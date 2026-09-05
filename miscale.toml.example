@@ -1,0 +1,42 @@
+# Mi Scale BLE Monitor — Configuration (sanitized example)
+# Copy this file to miscale.toml and fill in your values.
+# Keep miscale.toml out of version control — it contains sensitive personal data.
+
+[scan]
+# MAC address of the scale
+scale_mac = "XX:XX:XX:XX:XX:XX"
+
+# Bluetooth adapter to use
+hci_device = "hci0"
+
+# Scan interval in seconds (seconds between scan cycles)
+scan_interval = 5
+
+# Seconds between readings to consider a new measurement session
+session_gap_seconds = 5
+
+[time_sync]
+# Set the scale's internal clock before scanning.
+# Recommended: enable once, then disable after confirming timestamps are correct.
+enabled = false
+
+[logging]
+# Log file path (set to "" to disable file logging)
+log_file = "~/.local/share/miscale/miscale.log"
+
+# Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
+log_level = "DEBUG"
+
+[user_info]
+
+[user_info.person1]
+name = "Person1"
+start_weight = 70.0
+height = 170
+age = 40
+
+[user_info.person2]
+name = "Person2"
+start_weight = 70.0
+height = 165
+age = 40
