@@ -7,12 +7,16 @@ decodes weight/impedance readings, and logs them.
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+
+import numpy as np
 
 try:
     # Python 3.11+
@@ -43,9 +47,7 @@ CHAR_FW_REV = "00002a28-0000-1000-8000-00805f9b34fb"
 
 # Huami Configuration service (00001530) characteristics
 CHAR_BATTERY = "00001543-0000-3512-2118-0009af100700"
-
-# Huami Configuration service (00001530) characteristics
-CHAR_BATTERY = "00001543-0000-3512-2118-0009af100700"
+CHAR_CONFIG = "00001542-0000-3512-2118-0009af100700"
 
 # Byte 0 unit codes (XMTZC05HM, 13-byte payload on 0000181b service)
 UNIT_KG = 0x02
@@ -251,8 +253,10 @@ def parse_advertisement(service_data: dict[bytes | str, bytes]) -> Optional[dict
     is_stabilized = bool(byte1 & (1 << FLAG_STABILIZED))       # bit 5 → overall bit 13
     load_removed = bool(byte1 & (1 << FLAG_LOAD_REMOVED))      # bit 7 → overall bit 15
 
-    # Valid reading: weight stabilised AND person still on scale
-    if not is_stabilized or load_removed:
+    # Valid reading: weight stabilised AND person still on scale AND impedance present
+    # Impedance always arrives last in a session — a stabilized reading without it
+    # is incomplete and should be rejected (we need impedance for user detection).
+    if not is_stabilized or load_removed or not has_impedance:
         return None
 
     # Timestamp from bytes 2-8
@@ -399,6 +403,326 @@ class SessionTracker:
         return (session.session_id, phase, reading)
 
 # ---------------------------------------------------------------------------
+# User detection (weight + impedance, per-user Kalman filter)
+# ---------------------------------------------------------------------------
+#
+# Each configured user gets a small 2D Kalman filter tracking their "true"
+# (weight_kg, impedance_ohm) as a slowly-drifting hidden state. A finalized
+# scale reading is scored against every user's filter using a Mahalanobis
+# distance (normalizes weight and impedance onto one comparable scale using
+# the filter's own uncertainty), penalized if it implies an implausible
+# day-over-day weight jump for that user. The closest user wins, unless the
+# two best candidates are too close to call, in which case the reading is
+# flagged ambiguous rather than guessed.
+#
+# Filter state is persisted to a small JSON sidecar file so re-starts don't
+# have to re-bootstrap from the config's start_weight — that path is only
+# used the first time a user has no prior readings at all.
+
+
+@dataclass
+class UserFilterState:
+    user_id: str
+    name: str
+    x: np.ndarray                      # [weight_kg, impedance_ohm]
+    P: np.ndarray                      # 2x2 covariance
+    last_seen: Optional[datetime] = None
+
+
+@dataclass
+class DetectionResult:
+    assignment: Optional[str]          # user_id, or None if ambiguous
+    confidence: float                  # 0..1
+    distances: dict                    # user_id -> penalized distance
+    reason: str
+
+
+class UserDetector:
+    """Tracks per-user (weight, impedance) state and classifies finalized
+    scale readings against the configured users."""
+
+    def __init__(self, user_info_cfg: dict, detection_cfg: dict,
+                 state_file: Path, logger: logging.Logger):
+        self.logger = logger
+        self.state_file = state_file
+
+        self.process_var_weight = detection_cfg.get("process_var_weight", 0.02)
+        self.process_var_impedance = detection_cfg.get("process_var_impedance", 4.0)
+        self.meas_var_weight = detection_cfg.get("meas_var_weight", 0.09)
+        self.meas_var_impedance = detection_cfg.get("meas_var_impedance", 25.0)
+        self.default_start_impedance = detection_cfg.get("default_start_impedance", 500.0)
+        self.confidence_gap_threshold = detection_cfg.get("confidence_gap_threshold", 1.0)
+        self.max_plausible_delta_kg_per_day = detection_cfg.get(
+            "max_plausible_delta_kg_per_day", 2.0
+        )
+        # Normal same-day fluctuation (food, water, clothing) that should
+        # never be penalized regardless of how few hours have passed —
+        # without this floor, two readings an hour apart would treat any
+        # ordinary swing as an implausible jump.
+        self.max_intraday_delta_kg = detection_cfg.get("max_intraday_delta_kg", 1.5)
+        self.max_plausibility_penalty = detection_cfg.get("max_plausibility_penalty", 8.0)
+
+        self.states: dict[str, UserFilterState] = self._bootstrap(user_info_cfg)
+        self._load_persisted_state()
+
+    # -- setup ---------------------------------------------------------
+
+    def _bootstrap(self, user_info_cfg: dict) -> dict[str, UserFilterState]:
+        """Seed one filter per configured user from their start_weight."""
+        states = {}
+        for user_id, cfg in user_info_cfg.items():
+            start_weight = cfg.get("start_weight")
+            if start_weight is None:
+                self.logger.warning(
+                    "user_info.%s has no start_weight — skipping", user_id
+                )
+                continue
+            start_impedance = cfg.get("start_impedance", self.default_start_impedance)
+            states[user_id] = UserFilterState(
+                user_id=user_id,
+                name=cfg.get("name", user_id),
+                x=np.array([float(start_weight), float(start_impedance)]),
+                P=np.diag([1.0, 100.0]),  # fairly loose initial uncertainty
+                last_seen=None,
+            )
+        return states
+
+    def _load_persisted_state(self) -> None:
+        """Overlay any previously-saved filter state on top of the
+        config-bootstrapped defaults. Only users present in the file are
+        overridden — new users just keep their config bootstrap."""
+        if not self.state_file.exists():
+            self.logger.info(
+                "No persisted user state found at %s — using config start weights",
+                self.state_file,
+            )
+            return
+
+        try:
+            with open(self.state_file, "r") as f:
+                saved = json.load(f)
+        except (json.JSONDecodeError, OSError) as exc:
+            self.logger.warning("Could not read user state file (%s) — using config start weights", exc)
+            return
+
+        for user_id, entry in saved.items():
+            if user_id not in self.states:
+                continue
+            state = self.states[user_id]
+            state.x = np.array(entry["x"])
+            state.P = np.array(entry["P"])
+            state.last_seen = (
+                datetime.fromisoformat(entry["last_seen"])
+                if entry.get("last_seen") else None
+            )
+        self.logger.info("Loaded persisted user state from %s", self.state_file)
+
+    def _save_persisted_state(self) -> None:
+        self.state_file.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            user_id: {
+                "x": state.x.tolist(),
+                "P": state.P.tolist(),
+                "last_seen": state.last_seen.isoformat() if state.last_seen else None,
+            }
+            for user_id, state in self.states.items()
+        }
+        tmp_path = self.state_file.with_suffix(".tmp")
+        with open(tmp_path, "w") as f:
+            json.dump(payload, f, indent=2)
+        tmp_path.replace(self.state_file)
+
+    # -- classification --------------------------------------------------
+
+    def _predict(self, state: UserFilterState) -> None:
+        """Grow uncertainty to allow for drift since the last update."""
+        state.P = state.P + np.diag([self.process_var_weight, self.process_var_impedance])
+
+    def _mahalanobis(self, state: UserFilterState, z: np.ndarray) -> float:
+        R = np.diag([self.meas_var_weight, self.meas_var_impedance])
+        y = z - state.x
+        S = state.P + R
+        return float(np.sqrt(y.T @ np.linalg.inv(S) @ y))
+
+    def _plausibility_penalty(self, state: UserFilterState, new_weight: float,
+                               now: datetime) -> float:
+        if state.last_seen is None:
+            return 1.0
+        days_elapsed = (now - state.last_seen).total_seconds() / 86400.0
+        # Same-day comparisons always get at least the intraday budget;
+        # the per-day rate only extends the budget for multi-day gaps.
+        max_allowed = max(
+            self.max_intraday_delta_kg,
+            self.max_plausible_delta_kg_per_day * days_elapsed,
+        )
+        implied_delta = abs(new_weight - state.x[0])
+        if implied_delta <= max_allowed:
+            return 1.0
+        overshoot_ratio = implied_delta / max_allowed
+        penalty = 1.0 + (overshoot_ratio - 1.0) * 2.0
+        return min(penalty, self.max_plausibility_penalty)
+
+    def classify(self, weight_kg: float, impedance_ohm: float,
+                 timestamp: datetime) -> DetectionResult:
+        """Score a finalized reading against every user and either assign
+        it or flag it ambiguous. Updates the winning user's filter."""
+        z = np.array([weight_kg, float(impedance_ohm)])
+
+        scores: dict[str, float] = {}
+        for user_id, state in self.states.items():
+            self._predict(state)
+            base_dist = self._mahalanobis(state, z)
+            penalty = self._plausibility_penalty(state, weight_kg, timestamp)
+            scores[user_id] = base_dist * penalty
+
+        if not scores:
+            return DetectionResult(None, 0.0, {}, "no_users_configured")
+
+        ranked = sorted(scores.items(), key=lambda kv: kv[1])
+
+        if len(ranked) == 1:
+            best_user, best_score = ranked[0]
+            self._commit(best_user, z, timestamp)
+            return DetectionResult(best_user, 1.0, scores, "only_user_configured")
+
+        (best_user, best_score), (_, second_score) = ranked[0], ranked[1]
+        gap = second_score - best_score
+
+        if gap < self.confidence_gap_threshold:
+            return DetectionResult(
+                None,
+                1.0 - min(gap / self.confidence_gap_threshold, 1.0),
+                scores,
+                "low_confidence_gap",
+            )
+
+        confidence = min(gap / (self.confidence_gap_threshold * 3), 1.0)
+        self._commit(best_user, z, timestamp)
+        return DetectionResult(best_user, confidence, scores, "clear_winner")
+
+    def _commit(self, user_id: str, z: np.ndarray, timestamp: datetime) -> None:
+        """Kalman-update the winning user's filter and persist state."""
+        state = self.states[user_id]
+        R = np.diag([self.meas_var_weight, self.meas_var_impedance])
+        y = z - state.x
+        S = state.P + R
+        K = state.P @ np.linalg.inv(S)
+        state.x = state.x + K @ y
+        state.P = (np.eye(2) - K) @ state.P
+        state.last_seen = timestamp
+        self._save_persisted_state()
+
+    def name_for(self, user_id: Optional[str]) -> str:
+        if user_id is None:
+            return "unknown"
+        return self.states[user_id].name if user_id in self.states else user_id
+
+
+# ---------------------------------------------------------------------------
+# InfluxDB writer
+# ---------------------------------------------------------------------------
+
+
+class InfluxDBWriter:
+    """Writes scale readings to InfluxDB 1.x."""
+
+    def __init__(self, config: dict, logger: logging.Logger):
+        self._enabled = config.get("enabled", False)
+        self._host = config.get("host", "localhost")
+        self._port = config.get("port", 8086)
+        self._database = config.get("database", "miscale")
+        self._retention_policy = config.get("retention_policy", "autogen")
+        self._logger = logger
+        self._client = None
+
+        if self._enabled:
+            try:
+                from influxdb import InfluxDBClient  # type: ignore
+                self._client = InfluxDBClient(
+                    host=self._host,
+                    port=self._port,
+                    database=self._database,
+                )
+                self._client.write_points([])
+                self._logger.info(
+                    "InfluxDB connected at %s:%d, database=%s",
+                    self._host, self._port, self._database,
+                )
+            except Exception as exc:
+                self._client = None
+                self._logger.warning(
+                    "Failed to connect to InfluxDB at %s:%d: %s — "
+                    "measurements will not be stored",
+                    self._host, self._port, exc,
+                )
+
+    def get_last_weight(self, user: str) -> Optional[float]:
+        """Get the most recent weight for a user from InfluxDB."""
+        if not self._client or not self._enabled:
+            return None
+
+        try:
+            query = (
+                f"SELECT weight_kg FROM scale_reading "
+                f"WHERE \"user\" = '{user}' ORDER BY time DESC LIMIT 1"
+            )
+            result = self._client.query(query)  # type: ignore[assignment]
+            points = list(result.get_points())  # type: ignore[union-attr]
+            if points:
+                return float(points[0]["weight_kg"])
+        except Exception as exc:
+            self._logger.debug("Failed to query last weight for %s: %s", user, exc)
+        return None
+
+    def write_reading(self, session_id: str, user: str,
+                      reading: dict, confidence: float = 1.0):
+        """Write a finalized reading to InfluxDB."""
+        if not self._client or not self._enabled:
+            return
+
+        weight = reading["weight_kg"]
+        impedance = reading.get("impedance_ohm")
+        ts = reading["timestamp"]
+
+        influx_ts = ts.astimezone(timezone.utc)
+
+        json_body = [
+            {
+                "measurement": "scale_reading",
+                "tags": {
+                    "session": session_id,
+                    "user": user,
+                },
+                "fields": {
+                    "weight_kg": weight,
+                    "impedance_ohm": impedance if impedance else 0,
+                    "confidence": confidence,
+                },
+                "time": influx_ts,
+            },
+        ]
+
+        try:
+            self._client.write_points(json_body, retention_policy=self._retention_policy)
+            self._logger.debug(
+                "Wrote reading to InfluxDB: %.2f kg, user=%s, session=%s, confidence=%.2f",
+                weight, user, session_id, confidence,
+            )
+        except Exception as exc:
+            self._logger.warning("Failed to write to InfluxDB: %s", exc)
+
+    def close(self):
+        """Close the InfluxDB connection."""
+        if self._client:
+            self._client.close()
+            self._client = None
+
+    @property
+    def enabled(self) -> bool:
+        return self._enabled and self._client is not None
+
+
+# ---------------------------------------------------------------------------
 # Main scanner
 # ---------------------------------------------------------------------------
 
@@ -422,6 +746,17 @@ async def run_scanner(config: dict, logger: logging.Logger) -> None:
 
     tracker = SessionTracker(session_gap_seconds=session_gap)
 
+    user_info_cfg = config.get("user_info", {})
+    detection_cfg = config.get("detection", {})
+    state_file = Path(
+        detection_cfg.get("state_file", "~/.cache/miscale/user_state.json")
+    ).expanduser()
+    detector = UserDetector(user_info_cfg, detection_cfg, state_file, logger)
+
+    # InfluxDB writer (Stage 2)
+    influx_cfg = config.get("influxdb", {})
+    influx_writer = InfluxDBWriter(influx_cfg, logger)
+
     logger.info(
         "Starting Mi Scale BLE monitor (adapter=%s, interval=%ds)",
         hci_device,
@@ -431,6 +766,12 @@ async def run_scanner(config: dict, logger: logging.Logger) -> None:
         logger.info("Monitoring scale MAC: %s", mac.upper())
     else:
         logger.info("Monitoring all devices (no MAC filter)")
+
+    if influx_writer.enabled:
+        logger.info("InfluxDB logging enabled at %s:%d/%s",
+                     influx_cfg.get("host", "localhost"),
+                     influx_cfg.get("port", 8086),
+                     influx_cfg.get("database", "miscale"))
 
     # Optional: set scale internal clock
     time_cfg = config.get("time_sync", {})
@@ -527,9 +868,39 @@ async def run_scanner(config: dict, logger: logging.Logger) -> None:
                             reading["timestamp"].isoformat(),
                         )
 
+                        result = detector.classify(
+                            reading["weight_kg"], imp, reading["timestamp"]
+                        )
+
+                        if result.assignment is None:
+                            logger.warning(
+                                "[%s] Ambiguous reading (weight=%.2f kg, impedance=%d Ω) "
+                                "— distances=%s, reason=%s. Not auto-assigned.",
+                                session_id, reading["weight_kg"], imp,
+                                {uid: round(d, 2) for uid, d in result.distances.items()},
+                                result.reason,
+                            )
+                            influx_writer.write_reading(
+                                session_id, "unassigned", reading, result.confidence,
+                            )
+                        else:
+                            logger.info(
+                                "[%s] Detected user: %s (confidence %.2f, "
+                                "distances=%s)",
+                                session_id,
+                                detector.name_for(result.assignment),
+                                result.confidence,
+                                {uid: round(d, 2) for uid, d in result.distances.items()},
+                            )
+                            influx_writer.write_reading(
+                                session_id, result.assignment, reading, result.confidence,
+                            )
+
                 await asyncio.sleep(scan_interval)
         except asyncio.CancelledError:
             logger.info("Scanner cancelled")
+        finally:
+            influx_writer.close()
 
 
 def main():
