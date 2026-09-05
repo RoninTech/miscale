@@ -32,11 +32,44 @@ log_level = "DEBUG"
 [user_info.person1]
 name = "Person1"
 start_weight = 70.0
+# start_impedance = 500.0   # optional; falls back to detection.default_start_impedance
 height = 170
 age = 40
 
 [user_info.person2]
 name = "Person2"
 start_weight = 70.0
+# start_impedance = 500.0   # optional; falls back to detection.default_start_impedance
 height = 165
 age = 40
+
+[detection]
+# All of these are optional — sane defaults are used if omitted.
+
+# Where per-user Kalman filter state (weight/impedance estimate + last-seen
+# time) is persisted between runs, so the app doesn't re-bootstrap from
+# start_weight every restart. Only used on a genuine first run per user.
+state_file = "~/.cache/miscale/user_state.json"
+
+# Starting impedance guess for a user with no start_impedance set above.
+# Gets overwritten quickly once real readings come in.
+default_start_impedance = 500.0
+
+# How much each user's true weight/impedance is allowed to drift between
+# readings (higher = filter adapts faster to real change, but is less
+# resistant to noise).
+process_var_weight = 0.02
+process_var_impedance = 4.0
+
+# Expected noise in a single scale reading.
+meas_var_weight = 0.09
+meas_var_impedance = 25.0
+
+# Minimum separation (in normalized distance units) between the best and
+# second-best candidate user required to auto-assign a reading. Below this,
+# the reading is logged as ambiguous instead of guessed.
+confidence_gap_threshold = 1.0
+
+# Maximum plausible day-over-day weight change (kg) for one user; readings
+# implying a bigger jump are penalized when scored against that user.
+max_plausible_delta_kg_per_day = 2.0
