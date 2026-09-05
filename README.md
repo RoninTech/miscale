@@ -6,9 +6,12 @@ Standalone BLE scanner for the **Mi Body Composition Scale 2** (XMTZC05HM) that 
 
 - Scans for BLE advertisements from Mi Body Composition Scale 2 (XMTZC05HM)
 - Decodes the V2 advertisement protocol (13-byte payload on service `0000181b`)
-- Filters for valid, stabilised readings only
+- Filters for valid, stabilised readings (weight + impedance required)
 - Groups advertisements into per-session measurements (intermediate weight → final weight+impedance)
 - Deduplicates repeated advertisements within a 3-second window
+- Per-user Kalman filter auto-detection (weight + impedance) for multi-user households
+- Confidence gating: ambiguous readings tagged as `unassigned`
+- InfluxDB 1.x integration (configurable, enabled/disabled)
 - Optional GATT-based time sync to align the scale's internal clock
 - One-shot device info read (System ID, serial, firmware version, battery)
 - Configurable logging to console and file
@@ -22,6 +25,8 @@ Standalone BLE scanner for the **Mi Body Composition Scale 2** (XMTZC05HM) that 
 | BLE MAC | *(set in config)* |
 | Service UUID | `0000181b-0000-1000-8000-00805f9b34fb` |
 | Weight unit | kg (raw / 200) |
+
+All measurements are processed and stored in **kg** regardless of the scale's display unit. The advertisement payload contains a unit code (byte 0) that the parser uses to convert the raw weight to kg.
 
 ## Installation
 
@@ -97,7 +102,9 @@ The scale advertises a 13-byte payload on service UUID `0000181b`:
 | 7 | Minute | 0–59 |
 | 8 | Second | 0–59 |
 | 9–10 | Impedance | Ohms (if flag set) |
-| 11–12 | Weight | little-endian, \*200 for kg |
+| 11–12 | Weight | little-endian, \*200 for kg, \*100 for lbs/catty |
+
+> **Note:** The parser always converts the raw weight to kg using the unit code from byte 0, then works exclusively in kg.
 
 ### Status flags (byte 1, LSB-first)
 
@@ -107,7 +114,7 @@ The scale advertises a 13-byte payload on service UUID `0000181b`:
 | 5 | `is_stabilized` — weight has settled |
 | 7 | `load_removed` — person has stepped off |
 
-A reading is accepted when `is_stabilized == true` AND `load_removed == false`.
+A reading is accepted when `is_stabilized == true` AND `load_removed == false` AND `has_impedance == true`. Impedance is required for user detection.
 
 ## Measurement Lifecycle
 
@@ -123,7 +130,7 @@ The scanner logs intermediate and final phases separately. After step-off, idle 
 | Stage | Status | Description |
 |-------|--------|-------------|
 | 1 | **Done** | BLE monitor, session tracking, logging |
-| 2 | Planned | InfluxDB writer, user auto-detection, body metrics |
+| 2 | **Done** | InfluxDB writer, Kalman filter user detection, state persistence |
 | 3 | Planned | systemd daemon service |
 | 4 | Planned | GATT config commands (calibration, LED control, etc.) |
 

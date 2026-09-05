@@ -9,9 +9,31 @@
 
 ## User Detection
 
-The scale supports auto-detection of multiple users based on weight thresholds. Configure user profiles in `miscale.toml` with height, weight, and other biometric data.
+The scale supports auto-detection of multiple users using per-user Kalman filters that track each user's true weight and impedance as slowly-drifting hidden states.
 
-A midpoint weight threshold cleanly separates users. A hysteresis margin can be added in stage 2 to prevent flickering near the boundary. Going forward, previous readings may also be factored in to assign readings to users.
+### How it works
+1. Each configured user gets a 2D Kalman filter (state = `[weight_kg, impedance_ohm]`)
+2. On first run: filters are seeded from `start_weight` and default impedance (configurable)
+3. Filter state `(x, P)` is persisted to a JSON sidecar file between runs
+4. A finalized reading is scored against every user's filter using Mahalanobis distance
+5. A plausibility penalty is applied if the implied weight jump exceeds physiological limits
+6. The closest user wins, unless the gap between best and second-best is too small — then the reading is flagged ambiguous
+
+### Config
+- `user_info` section: defines users with `start_weight`, `height`, `age`, optional `start_impedance`
+- `detection` section: tuning parameters for the Kalman filter and classification thresholds
+- `state_file`: path to JSON sidecar for persisted filter state (default `~/.cache/miscale/user_state.json`)
+- `confidence_gap_threshold`: minimum separation (Mahalanobis units) to auto-assign (default 1.0)
+- `max_plausible_delta_kg_per_day`: max day-over-day weight change before penalty (default 2.0 kg)
+- `max_intraday_delta_kg`: same-day fluctuation budget that is never penalized (default 1.5 kg)
+
+### Reading validity
+A valid reading requires **all three** conditions:
+- `is_stabilized == true` — weight has settled
+- `load_removed == false` — person is still on the scale
+- `has_impedance == true` — impedance measurement is present (required for user detection)
+
+Impedance always arrives last in a measurement session — a stabilized reading without it is incomplete.
 
 ## GAP Service (00001801)
 
@@ -105,7 +127,9 @@ Service data payload is 13 bytes (excluding the 4-byte UUID). Multi-byte fields 
 | 7 | 15 | `load_removed` — person has stepped **off** the scale |
 
 **Recommended "accept this reading" condition:**
-`is_stabilized == true AND load_removed == false`
+`is_stabilized == true AND load_removed == false AND has_impedance == true`
+
+Impedance is required for user detection — it provides the discriminative signal that distinguishes users when their weights converge.
 
 ### Measurement lifecycle (verified from raw capture)
 
@@ -138,6 +162,8 @@ but its advertisement control-byte table is superseded.
 - impedance (Ω)
 - timestamp (from advertisement)
 
+All measurements are stored and processed in **kg** regardless of the scale's display unit (`-u`). The advertisement payload contains a unit code (byte 0) which the parser uses to convert the raw weight to kg before logging or writing to storage.
+
 ## Derived metrics (computed per-user using height, age, sex, weight, impedance)
 - BMI, BMR, visceral fat, lean body mass, body fat %, water %, bone mass, muscle mass, protein %, body type, metabolic age
 
@@ -158,10 +184,14 @@ but its advertisement control-byte table is superseded.
 - Runs in a loop until Ctrl+C
 
 ### Stage 2 — InfluxDB + user tracking
-- Write readings to InfluxDB (timestamped) 
-- Auto-assign user based on weight threshold and last readings
-- Compute derived body metrics per user
-- Configurable InfluxDB connection settings
+- Write readings to InfluxDB 1.x (timestamped) via `influxdb` package
+- Per-user 2D Kalman filters (weight + impedance) for user auto-detection
+- Mahalanobis distance scoring with plausibility constraints
+- Confidence gating: ambiguous readings are tagged `user="unassigned"`
+- Filter state persisted to JSON sidecar between runs
+- Configurable InfluxDB connection settings in `miscale.toml`
+- Measurements written to `scale_reading` measurement with tags: session, user; fields: weight_kg, impedance_ohm, confidence
+- InfluxDB enabled/disabled via `[influxdb] enabled = true/false`
 
 ### Stage 3 — Daemon
 - systemd service unit
@@ -189,7 +219,7 @@ but its advertisement control-byte table is superseded.
 - `tomllib` (stdlib, Python 3.11+)
 
 ## Dependencies (stage 2+)
-- `influxdb-client` (InfluxDB Python client)
+- `influxdb` (InfluxDB 1.x Python client)
 - `Xiaomi_Scale_Body_Metrics` or equivalent (body composition calculations)
 
 ## Relevant external resources
@@ -202,7 +232,8 @@ but its advertisement control-byte table is superseded.
 
 ### Parser state (as of 2026-09-04, updated after expert review)
 - **Protocol corrected:** Byte 0 is a unit code (not flags), byte 1 holds all status bits
-- **Valid reading:** `is_stabilized == true AND load_removed == false`
+- **Valid reading:** `is_stabilized == true AND load_removed == false AND has_impedance == true`
+- Impedance is required — a stabilized reading without impedance is incomplete (impedance arrives last in the session)
 - Previously rejected all readings because the parser used the wrong flag layout (16-bit word from bytes 0–1 instead of byte-0 unit code + byte-1 flags)
 - Verified against 5-packet raw capture: packets 4 and 5 correctly identified as valid readings
 
@@ -233,14 +264,15 @@ Clean raw hex capture:
 - [x] Stage 1: Add optional GATT time sync
 - [x] Stage 1: Implement measurement session tracking
 - [x] Stage 1: Add `-i` flag for device info (DIS + battery)
-- [ ] Stage 2: Add InfluxDB writer
-- [ ] Stage 2: Implement user auto-detection with hysteresis
-- [ ] Stage 2: Compute derived body metrics
+- [x] Stage 1: Add `-u` flag to set scale display unit (kg/lbs/jin)
+- [x] Stage 2: Add InfluxDB writer
+- [x] Stage 2: Implement user auto-detection with Kalman filter (weight + impedance)
+- [x] Stage 2: Compute derived body metrics
 - [ ] Stage 3: Create systemd service unit
 - [ ] Stage 3: Test daemon lifecycle
 - [ ] Stage 4: Implement GATT config commands via `00001542`
 - [ ] Stage 4: Add zero calibration command
 - [ ] Stage 4: Add LED display on/off control
-- [ ] Stage 4: Add display unit configuration
+- [x] Stage 4: Add display unit configuration
 - [ ] Stage 4: Implement balance test / one-foot measure mode
 - [ ] Stage 4: Add erase history command (with confirmation)
