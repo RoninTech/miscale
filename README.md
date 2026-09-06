@@ -12,7 +12,8 @@ Standalone BLE scanner for the **Mi Body Composition Scale 2** (XMTZC05HM) that 
 - Groups advertisements into per-session measurements (intermediate weight → final weight+impedance)
 - Deduplicates repeated advertisements within a 3-second window
 - Per-user Kalman filter auto-detection (weight + impedance) for multi-user households
-- Kalman filter state persisted to `user_state.json` between runs (never re-boots from `start_weight`)
+- Kalman filter state persisted to `user_state.json` between runs (never re-boots from `start_weight`/`start_impedance`)
+- Derived body metrics: BMI, BMR, body fat %, water %, lean mass
 - Confidence gating: ambiguous readings tagged as `unassigned`
 - InfluxDB 1.x integration (configurable, enabled/disabled)
 - GATT-based time sync via `-t` flag to align the scale's internal clock
@@ -177,6 +178,20 @@ The `[detection]` section in `miscale.toml` exposes several knobs:
 | `confidence_gap_threshold` | 1.0 | Minimum separation (Mahalanobis units) between best and second-best user to auto-assign |
 | `max_plausible_delta_kg_per_day` | 2.0 | Max day-over-day weight change before a plausibility penalty applies |
 | `default_start_impedance` | 500.0 | Fallback impedance guess when not set per-user |
+
+## Derived Body Metrics
+
+When a user has `height`, `age`, and `gender` configured, the scanner computes five derived metrics from published anthropometric formulas. These are logged alongside the detection result and stored in InfluxDB.
+
+| Metric | Formula | Requires |
+|---|---|---|
+| BMI | `weight_kg / height_m²` | `height` |
+| BMR | Mifflin-St Jeor equation (1990) | `height`, `age`, `gender` |
+| Body fat % | Deurenberg et al. (1991), based on BMI + age + sex | `height`, `age`, `gender` |
+| Water % | Hume & Weyers (1971), anthropometric estimate from height + weight + sex | `height`, `gender` |
+| Lean mass | Boer (1984), estimated lean body mass from height + weight + sex | `height`, `gender` |
+
+> **Note:** Body fat %, water %, and lean mass are anthropometric estimates using only height, weight, age, and sex — they do not use impedance. True BIA-based body composition requires proprietary coefficients that are not publicly available. The `_est` suffix on these field names in InfluxDB is a permanent reminder of this distinction.
 
 ## Project Roadmap
 

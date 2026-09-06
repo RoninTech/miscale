@@ -260,7 +260,7 @@ Clean raw hex capture:
 - [x] Stage 1: Implement advertisement parser for V2 protocol
 - [x] Stage 1: Add logging (console + file, configurable levels)
 - [x] Stage 1: Deduplicate readings (same weight within 30s window)
-- [x] Resolve protocol questions with expert → update parser accordingly
+- [x] Resolve protocol questions → update parser accordingly
 - [x] Stage 1: Implement measurement session tracking
 - [x] Stage 1: Add `-i` flag for device info (DIS + battery)
 - [x] Stage 1: Add `-t` flag to set scale internal clock

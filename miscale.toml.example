@@ -20,7 +20,7 @@ session_gap_seconds = 5
 log_file = "~/.local/share/miscale/miscale.log"
 
 # Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
-log_level = "DEBUG"
+log_level = "INFO"
 
 [user_info]
 
@@ -34,7 +34,7 @@ gender = "male"
 
 [user_info.person2]
 name = "Person2"
-start_weight = 55.0
+start_weight = 70.0
 # start_impedance = 500.0   # optional; falls back to detection.default_start_impedance
 height = 165
 age = 40
