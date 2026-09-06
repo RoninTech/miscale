@@ -169,7 +169,7 @@ async def get_scale_info(mac: str, logger: logging.Logger, config: dict) -> None
         (CHAR_FW_REV, "Firmware Version"),
         (CHAR_BATTERY, "Battery"),
         (CURRENT_TIME_CHAR, "Current Time"),
-        # (CHAR_CONFIG, "Scale Config"),  # omitted — raw hex not useful in --get-info
+        (CHAR_CONFIG, "Scale Config"),
     ]
     
     try:
@@ -191,7 +191,10 @@ async def get_scale_info(mac: str, logger: logging.Logger, config: dict) -> None
                         month, day, hour, minute, second = value[2], value[3], value[4], value[5], value[6]
                         logger.info("%s: %04d-%02d-%02d %02d:%02d:%02d", label, year, month, day, hour, minute, second)
                         continue
-
+                    # Special handling for Scale Config characteristic
+                    if char_uuid == CHAR_CONFIG and len(value) >= 3:
+                        logger.info("%s: %s", label, value.hex())
+                        continue
                     # Try to decode as UTF-8 string
                     try:
                         decoded = value.decode("utf-8").strip()
@@ -654,6 +657,139 @@ class UserDetector:
 
 
 # ---------------------------------------------------------------------------
+# Derived body metrics
+# ---------------------------------------------------------------------------
+#
+# BMI and BMR are exact, standard formulas (no estimation involved).
+#
+# fat_percent_est / water_percent_est / lean_mass_kg_est are anthropometric
+# estimates from published, peer-reviewed formulas (cited below) — the
+# "_est" suffix and separate naming is deliberate: these do NOT use
+# impedance at all, only weight/height/age/sex. Xiaomi's actual
+# impedance-based BIA coefficients are proprietary and unverified in any
+# public source, so they aren't implemented here. Treat these as rough,
+# clearly-labeled estimates, not a substitute for true BIA readings.
+
+
+def calculate_bmi(weight_kg: float, height_cm: Optional[float]) -> Optional[float]:
+    """Body Mass Index = weight_kg / height_m^2. Exact formula, no
+    estimation. Returns None if height isn't configured for this user."""
+    if not height_cm:
+        return None
+    height_m = height_cm / 100.0
+    return round(weight_kg / (height_m ** 2), 2)
+
+
+def calculate_bmr(weight_kg: float, height_cm: Optional[float],
+                   age: Optional[float], gender: Optional[str]) -> Optional[float]:
+    """Basal Metabolic Rate via the Mifflin-St Jeor equation (1990) —
+    the standard, widely-validated formula, not reverse-engineered.
+    Returns None if height/age/gender aren't all configured for this user."""
+    if not height_cm or age is None or not gender:
+        return None
+    base = 10.0 * weight_kg + 6.25 * height_cm - 5.0 * age
+    g = gender.strip().lower()
+    if g in ("male", "m"):
+        return round(base + 5.0, 1)
+    elif g in ("female", "f"):
+        return round(base - 161.0, 1)
+    return None
+
+
+def calculate_body_fat_percent_est(weight_kg: float, height_cm: Optional[float],
+                                    age: Optional[float],
+                                    gender: Optional[str]) -> Optional[float]:
+    """Anthropometric body fat % estimate — Deurenberg et al. (1991),
+    "Body mass index as a measure of body fatness: age- and sex-specific
+    prediction formulas", Br J Nutr 65(2):105-114. Uses BMI + age + sex
+    only; does NOT use impedance."""
+    bmi = calculate_bmi(weight_kg, height_cm)
+    if bmi is None or age is None or not gender:
+        return None
+    g = gender.strip().lower()
+    if g in ("male", "m"):
+        return round((bmi * 1.2) + (age * 0.23) - 16.2, 1)
+    elif g in ("female", "f"):
+        return round((bmi * 1.2) + (age * 0.23) - 5.4, 1)
+    return None
+
+
+def calculate_body_water_percent_est(weight_kg: float, height_cm: Optional[float],
+                                      gender: Optional[str]) -> Optional[float]:
+    """Anthropometric body water % estimate — Hume & Weyers (1971),
+    "Relationship between total body water and surface area in normal
+    and obese subjects", J Clin Pathol 24:234-238. Formula gives total
+    body water in litres; converted to % of body weight here (1 L water
+    ~= 1 kg). Uses height + weight + sex only; does NOT use impedance."""
+    if not height_cm or not gender:
+        return None
+    g = gender.strip().lower()
+    if g in ("male", "m"):
+        tbw_l = (0.194786 * height_cm) + (0.296785 * weight_kg) - 14.012934
+    elif g in ("female", "f"):
+        tbw_l = (0.34454 * height_cm) + (0.183809 * weight_kg) - 35.270121
+    else:
+        return None
+    if tbw_l <= 0:
+        return None
+    return round((tbw_l / weight_kg) * 100.0, 1)
+
+
+def calculate_lean_mass_kg_est(weight_kg: float, height_cm: Optional[float],
+                                gender: Optional[str]) -> Optional[float]:
+    """Anthropometric lean body mass estimate — Boer (1984), "Estimated
+    lean body mass as an index for normalization of body fluid volumes
+    in humans", Am J Physiol 247(4 Pt 2):F632-6. Uses height + weight +
+    sex only; does NOT use impedance."""
+    if not height_cm or not gender:
+        return None
+    g = gender.strip().lower()
+    if g in ("male", "m"):
+        return round((0.407 * weight_kg) + (0.267 * height_cm) - 19.2, 1)
+    elif g in ("female", "f"):
+        return round((0.252 * weight_kg) + (0.473 * height_cm) - 48.3, 1)
+    return None
+
+
+def compute_derived_metrics(user_info_cfg: dict, user_id: Optional[str],
+                             weight_kg: float) -> dict:
+    """Compute whatever derived metrics are possible for this user given
+    their configured height/age/gender. Returns {} for unassigned/unknown
+    users or users missing the needed config fields."""
+    if not user_id or user_id not in user_info_cfg:
+        return {}
+
+    cfg = user_info_cfg[user_id]
+    height_cm = cfg.get("height")
+    age = cfg.get("age")
+    gender = cfg.get("gender")
+
+    metrics = {}
+
+    bmi = calculate_bmi(weight_kg, height_cm)
+    if bmi is not None:
+        metrics["bmi"] = bmi
+
+    bmr = calculate_bmr(weight_kg, height_cm, age, gender)
+    if bmr is not None:
+        metrics["bmr"] = bmr
+
+    fat_pct = calculate_body_fat_percent_est(weight_kg, height_cm, age, gender)
+    if fat_pct is not None:
+        metrics["fat_percent_est"] = fat_pct
+
+    water_pct = calculate_body_water_percent_est(weight_kg, height_cm, gender)
+    if water_pct is not None:
+        metrics["water_percent_est"] = water_pct
+
+    lean_mass = calculate_lean_mass_kg_est(weight_kg, height_cm, gender)
+    if lean_mass is not None:
+        metrics["lean_mass_kg_est"] = lean_mass
+
+    return metrics
+
+
+# ---------------------------------------------------------------------------
 # InfluxDB writer
 # ---------------------------------------------------------------------------
 
@@ -711,7 +847,8 @@ class InfluxDBWriter:
 
     def write_reading(self, session_id: str, user: str,
                       reading: dict, confidence: float = 1.0,
-                      distances: Optional[dict] = None):
+                      distances: Optional[dict] = None,
+                      extra_fields: Optional[dict] = None):
         """Write a finalized reading to InfluxDB."""
         if not self._client or not self._enabled:
             return
@@ -733,6 +870,8 @@ class InfluxDBWriter:
             fields["unit_name"] = unit_name
         for uid, dist in (distances or {}).items():
             fields[f"dist_{uid}"] = float(dist)
+        for key, val in (extra_fields or {}).items():
+            fields[key] = val
 
         json_body = [
             {
@@ -941,17 +1080,21 @@ async def run_scanner(config: dict, logger: logging.Logger) -> None:
                                 result.distances,
                             )
                         else:
+                            metrics = compute_derived_metrics(
+                                user_info_cfg, result.assignment, reading["weight_kg"]
+                            )
                             logger.info(
                                 "[%s] Detected user: %s (confidence %.2f, "
-                                "distances=%s)",
+                                "distances=%s)%s",
                                 session_id,
                                 detector.name_for(result.assignment),
                                 result.confidence,
                                 {uid: round(d, 2) for uid, d in result.distances.items()},
+                                f", metrics={metrics}" if metrics else "",
                             )
                             influx_writer.write_reading(
                                 session_id, result.assignment, reading, result.confidence,
-                                result.distances,
+                                result.distances, metrics,
                             )
 
                 await asyncio.sleep(scan_interval)
