@@ -30,13 +30,15 @@ start_weight = 70.0
 # start_impedance = 500.0   # optional; falls back to detection.default_start_impedance
 height = 170
 age = 40
+gender = "male"
 
 [user_info.person2]
 name = "Person2"
-start_weight = 70.0
+start_weight = 55.0
 # start_impedance = 500.0   # optional; falls back to detection.default_start_impedance
 height = 165
 age = 40
+gender = "female"
 
 [detection]
 # All of these are optional — sane defaults are used if omitted.
