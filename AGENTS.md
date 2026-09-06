@@ -267,7 +267,7 @@ Clean raw hex capture:
 - [x] Stage 1: Add `-u` flag to set scale display unit (kg/lbs/jin)
 - [x] Stage 2: Add InfluxDB writer
 - [x] Stage 2: Implement user auto-detection with Kalman filter (weight + impedance)
-- [x] Stage 2: Compute derived body metrics
+- [x] Stage 2: Compute derived body metrics and store in DB
 - [ ] Stage 3: Create systemd service unit
 - [ ] Stage 3: Test daemon lifecycle
 - [ ] Stage 4: Implement GATT config commands via `00001542`
