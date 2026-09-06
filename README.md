@@ -1,5 +1,7 @@
 # Mi Scale BLE Monitor
 
+![Mi Body Composition Scale 2](https://i01.appmifile.com/webfile/globalimg/products/pc/mi-body-composition-scale-2/specs01.png)
+
 Standalone BLE scanner for the **Mi Body Composition Scale 2** (XMTZC05HM) that decodes weight and impedance readings from Bluetooth Low Energy advertisements, tracks measurement sessions, and logs results.
 
 ## Features
