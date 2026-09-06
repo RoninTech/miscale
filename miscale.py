@@ -141,10 +141,20 @@ async def set_scale_time(mac: str, logger: logging.Logger) -> None:
         logger.warning("Failed to set scale clock: %s", exc)
 
 
-async def get_scale_info(mac: str, logger: logging.Logger) -> None:
+async def get_scale_info(mac: str, logger: logging.Logger, config: dict) -> None:
     """Connect to the scale and read Device Information Service characteristics."""
     mac_upper = mac.upper()
     logger.info("Connecting to scale %s to read device information...", mac_upper)
+    
+    # Query InfluxDB for last weight unit if enabled
+    influx_cfg = config.get("influxdb", {})
+    influx_writer = InfluxDBWriter(influx_cfg, logger)
+    last_unit = influx_writer.get_last_unit()
+    if last_unit is not None:
+        unit_names = {0x02: "kg (SI)", 0x03: "lbs (Imperial)", 0x04: "catty (jin)"}
+        unit_str = unit_names.get(last_unit, f"unknown (0x{last_unit:02x})")
+        logger.info("Weight unit (from last reading): %s", unit_str)
+    influx_writer.close()
     
     chars = [
         (CHAR_SYSTEM_ID, "System ID"),
@@ -153,6 +163,8 @@ async def get_scale_info(mac: str, logger: logging.Logger) -> None:
         (CHAR_HW_REV, "Hardware Revision"),
         (CHAR_FW_REV, "Firmware Version"),
         (CHAR_BATTERY, "Battery"),
+        (CURRENT_TIME_CHAR, "Current Time"),
+        (CHAR_CONFIG, "Scale Config"),
     ]
     
     try:
@@ -167,6 +179,16 @@ async def get_scale_info(mac: str, logger: logging.Logger) -> None:
                             logger.info("%s: low (0x%02X%02X)", label, value[0], value[1])
                         else:
                             logger.info("%s: OK (0x%02X%02X)", label, value[0], value[1])
+                        continue
+                    # Special handling for Current Time characteristic
+                    if char_uuid == CURRENT_TIME_CHAR and len(value) >= 7:
+                        year = int.from_bytes(value[0:2], "little")
+                        month, day, hour, minute, second = value[2], value[3], value[4], value[5], value[6]
+                        logger.info("%s: %04d-%02d-%02d %02d:%02d:%02d", label, year, month, day, hour, minute, second)
+                        continue
+                    # Special handling for Scale Config characteristic
+                    if char_uuid == CHAR_CONFIG and len(value) >= 3:
+                        logger.info("%s: %s", label, value.hex())
                         continue
                     # Try to decode as UTF-8 string
                     try:
@@ -281,6 +303,7 @@ def parse_advertisement(service_data: dict[bytes | str, bytes]) -> Optional[dict
         "weight_kg": round(weight_kg, 2),
         "timestamp": ts,
         "raw_hex": data.hex(),
+        "unit": unit_code,
     }
 
     if has_impedance:
@@ -683,8 +706,17 @@ class InfluxDBWriter:
         weight = reading["weight_kg"]
         impedance = reading.get("impedance_ohm")
         ts = reading["timestamp"]
+        unit = reading.get("unit")
 
         influx_ts = ts.astimezone(timezone.utc)
+
+        fields = {
+            "weight_kg": weight,
+            "impedance_ohm": impedance if impedance else 0,
+            "confidence": confidence,
+        }
+        if unit is not None:
+            fields["unit"] = unit
 
         json_body = [
             {
@@ -693,11 +725,7 @@ class InfluxDBWriter:
                     "session": session_id,
                     "user": user,
                 },
-                "fields": {
-                    "weight_kg": weight,
-                    "impedance_ohm": impedance if impedance else 0,
-                    "confidence": confidence,
-                },
+                "fields": fields,
                 "time": influx_ts,
             },
         ]
@@ -710,6 +738,24 @@ class InfluxDBWriter:
             )
         except Exception as exc:
             self._logger.warning("Failed to write to InfluxDB: %s", exc)
+
+    def get_last_unit(self) -> Optional[int]:
+        """Get the weight unit from the most recent reading."""
+        if not self._client or not self._enabled:
+            return None
+
+        try:
+            query = (
+                f"SELECT unit FROM scale_reading "
+                f"ORDER BY time DESC LIMIT 1"
+            )
+            result = self._client.query(query)  # type: ignore[assignment]
+            points = list(result.get_points())  # type: ignore[union-attr]
+            if points and "unit" in points[0]:
+                return int(points[0]["unit"])
+        except Exception as exc:
+            self._logger.debug("Failed to query last unit: %s", exc)
+        return None
 
     def close(self):
         """Close the InfluxDB connection."""
@@ -912,6 +958,11 @@ def main():
         action="store_true",
         help="Read device information from the scale and exit",
     )
+    parser.add_argument(
+        "-t", "--set-time",
+        action="store_true",
+        help="Set the scale's internal clock to the current time and exit",
+    )
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -933,7 +984,17 @@ def main():
         if not mac:
             logger.error("No scale MAC configured in [scan] section")
             sys.exit(1)
-        asyncio.run(get_scale_info(mac, logger))
+        asyncio.run(get_scale_info(mac, logger, config))
+        return
+
+    # One-shot time sync
+    if args.set_time:
+        scan_cfg = config.get("scan", {})
+        mac = scan_cfg.get("scale_mac", "")
+        if not mac:
+            logger.error("No scale MAC configured in [scan] section")
+            sys.exit(1)
+        asyncio.run(set_scale_time(mac, logger))
         return
 
     try:

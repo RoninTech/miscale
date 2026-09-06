@@ -14,7 +14,7 @@ Standalone BLE scanner for the **Mi Body Composition Scale 2** (XMTZC05HM) that 
 - Per-user Kalman filter auto-detection (weight + impedance) for multi-user households
 - Confidence gating: ambiguous readings tagged as `unassigned`
 - InfluxDB 1.x integration (configurable, enabled/disabled)
-- Optional GATT-based time sync to align the scale's internal clock
+- GATT-based time sync via `-t` flag to align the scale's internal clock
 - One-shot device info read (System ID, serial, firmware version, battery)
 - Configurable logging to console and file
 - TOML configuration file
@@ -62,7 +62,15 @@ python miscale.py
 python miscale.py -i
 ```
 
-This connects to the scale and reads the Device Information Service characteristics (System ID, PnP ID, serial number, hardware/firmware revision) and battery status, then exits.
+This connects to the scale and reads the Device Information Service characteristics (System ID, PnP ID, serial number, hardware/firmware revision) and battery status, then exits. It also displays the scale's current internal clock and, if InfluxDB is enabled, the weight unit from the most recent stored reading.
+
+### Set scale internal clock (one-shot)
+
+```bash
+python miscale.py -t
+```
+
+This connects to the scale and writes the current time to its internal clock, then verifies by reading it back.
 
 ### Custom config file
 
@@ -80,9 +88,6 @@ scale_mac = "AA:BB:CC:DD:EE:FF"   # Your scale's BLE MAC
 hci_device = "hci0"                # Bluetooth adapter
 scan_interval = 5                  # Seconds between scan cycles
 session_gap_seconds = 5            # Gap to detect a new measurement
-
-[time_sync]
-enabled = false                    # Sync scale clock at startup
 
 [logging]
 log_file = "${HOME}/projects/miscale/miscale.log"

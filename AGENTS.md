@@ -175,7 +175,7 @@ All measurements are stored and processed in **kg** regardless of the scale's di
 - Decodes V2 advertisement payload, filters for valid (stabilised) readings
 - Logs to console + file (configurable) with levels: DEBUG, INFO, WARNING, ERROR, CRITICAL
 - TOML config file (`miscale.toml`)
-- Optional GATT-based time sync to scale (one-shot at startup)
+- GATT-based time sync via `-t` flag (one-shot, writes to `00002a2b` characteristic)
 - Measurement session tracking: groups advertisements into per-session readings
   - Logs intermediate weight-only readings
   - Logs final readings when impedance appears
@@ -242,7 +242,7 @@ All measurements are stored and processed in **kg** regardless of the scale's di
 - Detects new sessions by time gap (>5s configurable) or weight change (>0.5 kg)
 - Logs intermediate weight-only readings and final weight+impedance readings
 - Advertisement deduplication (same weight+impedance within 3s window)
-- Optional GATT time sync via `00002a2b` characteristic (enabled/disabled in config)
+- GATT time sync via `-t` flag writes to `00002a2b` characteristic with readback verification
 
 ### Raw capture data
 Clean raw hex capture:
@@ -261,9 +261,9 @@ Clean raw hex capture:
 - [x] Stage 1: Add logging (console + file, configurable levels)
 - [x] Stage 1: Deduplicate readings (same weight within 30s window)
 - [x] Resolve protocol questions with expert → update parser accordingly
-- [x] Stage 1: Add optional GATT time sync
 - [x] Stage 1: Implement measurement session tracking
 - [x] Stage 1: Add `-i` flag for device info (DIS + battery)
+- [x] Stage 1: Add `-t` flag to set scale internal clock
 - [x] Stage 1: Add `-u` flag to set scale display unit (kg/lbs/jin)
 - [x] Stage 2: Add InfluxDB writer
 - [x] Stage 2: Implement user auto-detection with Kalman filter (weight + impedance)
