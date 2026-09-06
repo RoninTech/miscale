@@ -54,6 +54,13 @@ UNIT_KG = 0x02
 UNIT_LBS = 0x03
 UNIT_CATTY = 0x04
 
+UNIT_NAMES = {UNIT_KG: "kg", UNIT_LBS: "lbs", UNIT_CATTY: "catty"}
+
+# Conversion factors to true kilograms. "Catty" here is the Chinese
+# market catty/jin used by Xiaomi scales (0.5 kg), not the Imperial catty.
+LBS_TO_KG = 0.45359237
+CATTY_TO_KG = 0.5
+
 # Byte 1 status flag bit positions (LSB-first within byte 1)
 # Overall bit = byte1_bit + 8 (since byte 0 provides 8 bits)
 FLAG_HAS_IMPEDANCE = 1     # bit 1 of byte1 = overall bit 9
@@ -151,9 +158,7 @@ async def get_scale_info(mac: str, logger: logging.Logger, config: dict) -> None
     influx_writer = InfluxDBWriter(influx_cfg, logger)
     last_unit = influx_writer.get_last_unit()
     if last_unit is not None:
-        unit_names = {0x02: "kg (SI)", 0x03: "lbs (Imperial)", 0x04: "catty (jin)"}
-        unit_str = unit_names.get(last_unit, f"unknown (0x{last_unit:02x})")
-        logger.info("Weight unit (from last reading): %s", unit_str)
+        logger.info("Weight unit (from last reading): %s", last_unit)
     influx_writer.close()
     
     chars = [
@@ -244,8 +249,10 @@ def parse_advertisement(service_data: dict[bytes | str, bytes]) -> Optional[dict
       bytes 9-10 = impedance (little-endian, if has_impedance)
       bytes 11-12 = weight (little-endian, *200 for kg, *100 for lbs)
 
-    Returns a dict with weight_kg, impedance_ohm, timestamp, raw_hex
-    or None if the advertisement is not from a valid scale reading.
+    Returns a dict with weight_kg (always true kilograms, converted if the
+    scale is set to lbs/catty), unit_code, unit_name, impedance_ohm (if
+    present), timestamp, raw_hex — or None if the advertisement is not a
+    valid scale reading.
     """
     # Look for our service UUID in service_data
     data = None
@@ -263,8 +270,13 @@ def parse_advertisement(service_data: dict[bytes | str, bytes]) -> Optional[dict
     unit_code = payload[0]
     if unit_code == UNIT_KG:
         weight_divisor = 200.0
-    elif unit_code in (UNIT_LBS, UNIT_CATTY):
+        to_kg_factor = 1.0
+    elif unit_code == UNIT_LBS:
         weight_divisor = 100.0
+        to_kg_factor = LBS_TO_KG
+    elif unit_code == UNIT_CATTY:
+        weight_divisor = 100.0
+        to_kg_factor = CATTY_TO_KG
     else:
         # Unknown unit code — skip
         return None
@@ -275,10 +287,11 @@ def parse_advertisement(service_data: dict[bytes | str, bytes]) -> Optional[dict
     is_stabilized = bool(byte1 & (1 << FLAG_STABILIZED))       # bit 5 → overall bit 13
     load_removed = bool(byte1 & (1 << FLAG_LOAD_REMOVED))      # bit 7 → overall bit 15
 
-    # Valid reading: weight stabilised AND person still on scale AND impedance present
-    # Impedance always arrives last in a session — a stabilized reading without it
-    # is incomplete and should be rejected (we need impedance for user detection).
-    if not is_stabilized or load_removed or not has_impedance:
+    # Valid reading: weight stabilised AND person still on scale.
+    # Impedance typically only arrives once the reading is fully final —
+    # readings without it yet are still valid "intermediate" readings and
+    # are handled as such by SessionTracker, not rejected here.
+    if not is_stabilized or load_removed:
         return None
 
     # Timestamp from bytes 2-8
@@ -297,13 +310,15 @@ def parse_advertisement(service_data: dict[bytes | str, bytes]) -> Optional[dict
         return None
 
     weight_raw = int.from_bytes(payload[11:13], "little")
-    weight_kg = weight_raw / weight_divisor
+    weight_native = weight_raw / weight_divisor   # in the scale's own unit
+    weight_kg = weight_native * to_kg_factor       # always true kilograms
 
     result = {
         "weight_kg": round(weight_kg, 2),
+        "unit_code": unit_code,
+        "unit_name": UNIT_NAMES.get(unit_code, f"unknown (0x{unit_code:02x})"),
         "timestamp": ts,
         "raw_hex": data.hex(),
-        "unit": unit_code,
     }
 
     if has_impedance:
@@ -686,7 +701,7 @@ class InfluxDBWriter:
 
         try:
             query = (
-                f"SELECT weight_kg FROM scale_reading "
+                f'SELECT weight_kg FROM "weight" '
                 f"WHERE \"user\" = '{user}' ORDER BY time DESC LIMIT 1"
             )
             result = self._client.query(query)  # type: ignore[assignment]
@@ -698,7 +713,8 @@ class InfluxDBWriter:
         return None
 
     def write_reading(self, session_id: str, user: str,
-                      reading: dict, confidence: float = 1.0):
+                      reading: dict, confidence: float = 1.0,
+                      distances: Optional[dict] = None):
         """Write a finalized reading to InfluxDB."""
         if not self._client or not self._enabled:
             return
@@ -706,7 +722,7 @@ class InfluxDBWriter:
         weight = reading["weight_kg"]
         impedance = reading.get("impedance_ohm")
         ts = reading["timestamp"]
-        unit = reading.get("unit")
+        unit_name = reading.get("unit_name")
 
         influx_ts = ts.astimezone(timezone.utc)
 
@@ -714,15 +730,17 @@ class InfluxDBWriter:
             "weight_kg": weight,
             "impedance_ohm": impedance if impedance else 0,
             "confidence": confidence,
+            "session_id": session_id,
         }
-        if unit is not None:
-            fields["unit"] = unit
+        if unit_name is not None:
+            fields["unit_name"] = unit_name
+        for uid, dist in (distances or {}).items():
+            fields[f"dist_{uid}"] = float(dist)
 
         json_body = [
             {
-                "measurement": "scale_reading",
+                "measurement": "weight",
                 "tags": {
-                    "session": session_id,
                     "user": user,
                 },
                 "fields": fields,
@@ -739,20 +757,20 @@ class InfluxDBWriter:
         except Exception as exc:
             self._logger.warning("Failed to write to InfluxDB: %s", exc)
 
-    def get_last_unit(self) -> Optional[int]:
-        """Get the weight unit from the most recent reading."""
+    def get_last_unit(self) -> Optional[str]:
+        """Get the weight unit name from the most recent reading."""
         if not self._client or not self._enabled:
             return None
 
         try:
             query = (
-                f"SELECT unit FROM scale_reading "
-                f"ORDER BY time DESC LIMIT 1"
+                'SELECT "unit_name" FROM "weight" '
+                "ORDER BY time DESC LIMIT 1"
             )
             result = self._client.query(query)  # type: ignore[assignment]
             points = list(result.get_points())  # type: ignore[union-attr]
-            if points and "unit" in points[0]:
-                return int(points[0]["unit"])
+            if points and points[0].get("unit_name"):
+                return str(points[0]["unit_name"])
         except Exception as exc:
             self._logger.debug("Failed to query last unit: %s", exc)
         return None
@@ -872,7 +890,7 @@ async def run_scanner(config: dict, logger: logging.Logger) -> None:
                                     has_imp = bool(byte1 & (1 << 1))
                                     is_stab = bool(byte1 & (1 << 5))
                                     load_rem = bool(byte1 & (1 << 7))
-                                    unit_name = {0x02: "kg", 0x03: "lbs", 0x04: "catty"}.get(byte0, f"0x{byte0:02x}")
+                                    unit_name = UNIT_NAMES.get(byte0, f"0x{byte0:02x}")
                                     logger.debug(
                                         "Rejected %s: unit=%s byte1=%s has_imp=%s stable=%s load_rem=%s",
                                         addr_upper, unit_name, f"0x{byte1:02x}", has_imp, is_stab, load_rem,
@@ -923,6 +941,7 @@ async def run_scanner(config: dict, logger: logging.Logger) -> None:
                             )
                             influx_writer.write_reading(
                                 session_id, "unassigned", reading, result.confidence,
+                                result.distances,
                             )
                         else:
                             logger.info(
@@ -935,6 +954,7 @@ async def run_scanner(config: dict, logger: logging.Logger) -> None:
                             )
                             influx_writer.write_reading(
                                 session_id, result.assignment, reading, result.confidence,
+                                result.distances,
                             )
 
                 await asyncio.sleep(scan_interval)
