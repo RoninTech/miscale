@@ -1,4 +1,5 @@
 __pycache__/
 miscale.toml
 miscale.log
+user_state.json
 ${HOME}/

@@ -169,7 +169,7 @@ async def get_scale_info(mac: str, logger: logging.Logger, config: dict) -> None
         (CHAR_FW_REV, "Firmware Version"),
         (CHAR_BATTERY, "Battery"),
         (CURRENT_TIME_CHAR, "Current Time"),
-        (CHAR_CONFIG, "Scale Config"),
+        # (CHAR_CONFIG, "Scale Config"),  # omitted — raw hex not useful in --get-info
     ]
     
     try:
@@ -191,10 +191,7 @@ async def get_scale_info(mac: str, logger: logging.Logger, config: dict) -> None
                         month, day, hour, minute, second = value[2], value[3], value[4], value[5], value[6]
                         logger.info("%s: %04d-%02d-%02d %02d:%02d:%02d", label, year, month, day, hour, minute, second)
                         continue
-                    # Special handling for Scale Config characteristic
-                    if char_uuid == CHAR_CONFIG and len(value) >= 3:
-                        logger.info("%s: %s", label, value.hex())
-                        continue
+
                     # Try to decode as UTF-8 string
                     try:
                         decoded = value.decode("utf-8").strip()

@@ -12,6 +12,7 @@ Standalone BLE scanner for the **Mi Body Composition Scale 2** (XMTZC05HM) that 
 - Groups advertisements into per-session measurements (intermediate weight → final weight+impedance)
 - Deduplicates repeated advertisements within a 3-second window
 - Per-user Kalman filter auto-detection (weight + impedance) for multi-user households
+- Kalman filter state persisted to `user_state.json` between runs (never re-boots from `start_weight`)
 - Confidence gating: ambiguous readings tagged as `unassigned`
 - InfluxDB 1.x integration (configurable, enabled/disabled)
 - GATT-based time sync via `-t` flag to align the scale's internal clock
@@ -131,6 +132,51 @@ A reading is accepted when `is_stabilized == true` AND `load_removed == false` A
 4. **Idle** — scale re-advertises last reading with `load_removed` flag set
 
 The scanner logs intermediate and final phases separately. After step-off, idle packets are silently ignored.
+
+## User Detection
+
+The scale supports auto-detection of multiple users using per-user Kalman filters that track each user's true weight and impedance as slowly-drifting hidden states.
+
+### How it works
+
+1. Each configured user gets a 2D Kalman filter (state = `[weight_kg, impedance_ohm]`)
+2. On first run: filters are seeded from `start_weight` and `start_impedance` (or a configurable default)
+3. Filter state `(x, P)` is persisted to a JSON sidecar file between runs
+4. A finalized reading is scored against every user's filter using Mahalanobis distance
+5. A plausibility penalty is applied if the implied weight jump exceeds physiological limits
+6. The closest user wins, unless the gap between best and second-best is too small — then the reading is flagged ambiguous
+
+### State persistence (`user_state.json`)
+
+Filter state is persisted to a JSON file (default `~/.cache/miscale/user_state.json`, configurable via `detection.state_file` in `miscale.toml`). This file stores each user's current Kalman filter estimate and last-seen timestamp, so the app doesn't re-bootstrap from `start_weight` on every restart.
+
+**This file should be gitignored** — it contains personal biometric data that drifts over time. Add `user_state.json` to `.gitignore` (or the path you configure).
+
+A typical entry looks like:
+
+```json
+{
+  "paul": {
+    "x": [67.08, 600.0],
+    "P": [[0.10, 0.0], [0.0, 24.30]],
+    "last_seen": "2026-09-06T13:58:14+00:00"
+  }
+}
+```
+
+### Tuning
+
+The `[detection]` section in `miscale.toml` exposes several knobs:
+
+| Parameter | Default | Effect |
+|---|---|---|
+| `process_var_weight` | 0.02 | How much a user's true weight is allowed to drift between readings |
+| `process_var_impedance` | 4.0 | Same for impedance |
+| `meas_var_weight` | 0.09 | Expected noise in a single scale weight reading |
+| `meas_var_impedance` | 25.0 | Expected noise in a single impedance reading |
+| `confidence_gap_threshold` | 1.0 | Minimum separation (Mahalanobis units) between best and second-best user to auto-assign |
+| `max_plausible_delta_kg_per_day` | 2.0 | Max day-over-day weight change before a plausibility penalty applies |
+| `default_start_impedance` | 500.0 | Fallback impedance guess when not set per-user |
 
 ## Project Roadmap
 
