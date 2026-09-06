@@ -68,3 +68,12 @@ confidence_gap_threshold = 1.0
 # Maximum plausible day-over-day weight change (kg) for one user; readings
 # implying a bigger jump are penalized when scored against that user.
 max_plausible_delta_kg_per_day = 2.0
+
+[influxdb]
+# InfluxDB 1.x settings
+host = "localhost"
+port = 8086
+database = "miscale"
+retention_policy = "autogen"
+# Turns on the influxdb handling otherwise only logging occurs.
+enabled = true
