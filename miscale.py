@@ -773,11 +773,6 @@ async def run_scanner(config: dict, logger: logging.Logger) -> None:
                      influx_cfg.get("port", 8086),
                      influx_cfg.get("database", "miscale"))
 
-    # Optional: set scale internal clock
-    time_cfg = config.get("time_sync", {})
-    if time_cfg.get("enabled", False) and mac:
-        await set_scale_time(mac, logger)
-
     # Use the modern bluez kwarg for adapter selection
     bluez_args = {"adapter": hci_device} if hci_device else None
 
