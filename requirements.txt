@@ -1,4 +1,10 @@
-bleak>=0.22.2
-influxdb>=5.3.0
-numpy>=1.24.0
-tomli>=2.0.0; python_version < "3.11"
+bleak>=0.21
+numpy>=1.24
+
+# Optional: only needed if [influxdb].enabled = true in miscale.toml.
+# Imported lazily, so the script runs fine without this installed as long
+# as InfluxDB writing stays disabled.
+influxdb>=5.3.1
+
+# Optional: only needed on Python < 3.11 (tomllib is stdlib from 3.11 on).
+tomli>=2.0; python_version < "3.11"
