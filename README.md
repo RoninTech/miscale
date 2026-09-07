@@ -194,5 +194,4 @@ See `AGENTS.md` for the full protocol notes, including a documented
 correction to an earlier (incorrect) byte-layout assumption.
 
 ## License
-
-*(Add a license file — none specified yet.)*
+- MIT.  See LICENSE file.
