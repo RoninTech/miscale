@@ -88,9 +88,19 @@ enabled = true
 # "unassigned" after pending_timeout_hours, same as when this is disabled.
 enabled = false
  
-# Your self-hosted ntfy server, reachable from your phone over LAN.
-base_url = "http://ntfy.local"
+# Port your self-hosted ntfy server is exposed on. base_url is normally
+# auto-detected at startup (this machine's LAN IP + this port) — this is
+# the one piece auto-detection can't guess for you.
+port = 8080
  
+# Uncomment and set explicitly only if auto-detection picks the wrong
+# address (e.g. machine has multiple network interfaces, an active
+# VPN, or Docker networking that confuses the auto-detected route). Must
+# be reachable from your phone, not just from this machine — "localhost"
+# will NOT work here, since it's baked into the notification's tap-action
+# URLs, which your phone executes, not this script.
+# base_url = "http://192.168.1.50:8080"
+
 # Two distinct topics: your phone subscribes to `topic` to receive the
 # notification; `reply_topic` is where tapping a button POSTs the answer,
 # and what this script long-polls to hear about it. Pick anything —

@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import queue
+import socket
 import sys
 import threading
 import time
@@ -1034,6 +1035,23 @@ class PendingConfirmations:
         }
 
 
+def detect_local_ip() -> Optional[str]:
+    """Best-effort detection of this machine's LAN-facing IP address, by
+    asking the OS which local interface it would use to reach an external
+    address. No packets actually reach 8.8.8.8 — UDP is connectionless,
+    so connect() here just consults the routing table to pick a source
+    interface/IP, which is normally the real LAN adapter even on a
+    machine with multiple interfaces (Docker bridges, VPNs, etc. are
+    excluded since they're not the default route). Returns None if no
+    route exists at all (e.g. no network connectivity)."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+    except OSError:
+        return None
+
+
 def send_ambiguous_notification(base_url: str, topic: str, reply_topic: str,
                                  session_id: str, reading: dict, distances: dict,
                                  user_ids: list, logger: logging.Logger) -> None:
@@ -1223,11 +1241,10 @@ async def run_scanner(config: dict, logger: logging.Logger) -> None:
     # Ambiguous-reading confirmation via ntfy (optional)
     ntfy_cfg = config.get("ntfy", {})
     ntfy_enabled = ntfy_cfg.get("enabled", False)
-    ntfy_base_url = ntfy_cfg.get("base_url", "https://ntfy.sh")
+    ntfy_send_weight_readings = ntfy_cfg.get("send_weight_readings", False)
     ntfy_topic = ntfy_cfg.get("topic", "")
     ntfy_reply_topic = ntfy_cfg.get("reply_topic", "")
     ntfy_timeout_hours = ntfy_cfg.get("pending_timeout_hours", 24)
-    ntfy_send_weight_readings = ntfy_cfg.get("send_weight_readings", False)
     ntfy_weight_topic_template = ntfy_cfg.get(
         "weight_reading_topic_template", "miscale_{user}_weight_reading"
     )
@@ -1235,6 +1252,30 @@ async def run_scanner(config: dict, logger: logging.Logger) -> None:
         ntfy_cfg.get("pending_file", "~/.cache/miscale/pending_confirmations.json")
     ).expanduser()
     pending_confirmations = PendingConfirmations(pending_confirmations_file, logger)
+
+    # base_url: use an explicit config value if given (escape hatch for
+    # multi-NIC machines, active VPNs, or anything else that trips up
+    # auto-detection); otherwise auto-detect this machine's LAN IP, since
+    # a manually-typed address is exactly what caused a phone-side "can't
+    # connect to localhost" failure previously — the URL baked into the
+    # notification's tap-actions has to be reachable from the *phone*,
+    # not just from this script.
+    ntfy_base_url = ntfy_cfg.get("base_url", "").strip()
+    if not ntfy_base_url and (ntfy_enabled or ntfy_send_weight_readings):
+        ntfy_port = ntfy_cfg.get("port", 8080)
+        detected_ip = detect_local_ip()
+        if detected_ip:
+            ntfy_base_url = f"http://{detected_ip}:{ntfy_port}"
+            logger.info(
+                "Auto-detected LAN IP for ntfy: %s -> base_url=%s", detected_ip, ntfy_base_url
+            )
+        else:
+            logger.warning(
+                "Could not auto-detect a LAN IP for ntfy (no network route found) — "
+                "set ntfy.base_url manually in config. Disabling ntfy features for this run."
+            )
+            ntfy_enabled = False
+            ntfy_send_weight_readings = False
 
     ntfy_reply_queue: "queue.Queue" = queue.Queue()
     ntfy_stop_event = threading.Event()
