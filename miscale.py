@@ -1194,8 +1194,12 @@ def send_ambiguous_notification(base_url: str, topic: str, reply_topic: str,
             status = resp.status
             body = resp.read().decode("utf-8", errors="replace")
         logger.info(
-            "[%s] Sent ntfy confirmation request to topic '%s' (HTTP %d, response: %s)",
-            session_id, topic, status, body.strip() or "<empty>",
+            "[%s] Sent ntfy confirmation request to topic '%s' (HTTP %d)",
+            session_id, topic, status,
+        )
+        logger.debug(
+                "[%s] ntfy %s confirmation contents: %s",
+                session_id, topic, body.strip() or "<empty>"
         )
     except (urllib.error.URLError, OSError) as exc:
         logger.warning(
@@ -1245,8 +1249,12 @@ def send_weight_reading_notification(base_url: str, topic_template: str, user_id
             status = resp.status
             body = resp.read().decode("utf-8", errors="replace")
         logger.info(
-            "[%s] Sent weight-reading notification to topic '%s' (HTTP %d, response: %s)",
-            user_id, topic, status, body.strip() or "<empty>",
+            "[%s] Sent weight-reading notification to topic '%s' (HTTP %d)",
+            user_id, topic, status,
+        )
+        logger.debug(
+                "[%s] Sent %s response : %s",
+                user_id, topic, body.strip() or "<empty>",
         )
     except (urllib.error.URLError, OSError) as exc:
         logger.warning(
