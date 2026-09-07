@@ -1,0 +1,20 @@
+[Unit]
+Description=Mi Scale BLE Monitor
+After=bluetooth.target network-online.target
+Wants=bluetooth.target network-online.target
+
+[Service]
+Type=simple
+# Edit User/Group and the two paths below to match your install.
+# Run as your own user, not root — BLE scanning via BlueZ's D-Bus API does
+# not require root privileges, and running network-facing services as
+# root unnecessarily is worth avoiding.
+User=CHANGE_ME
+Group=CHANGE_ME
+WorkingDirectory=/path/to/miscale
+ExecStart=/usr/bin/python3 /path/to/miscale/miscale.py --config /path/to/miscale/miscale.toml
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
