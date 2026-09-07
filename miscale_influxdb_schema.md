@@ -8,14 +8,14 @@
 
 | Name | Type | Description |
 |---|---|---|
-| `user` | tag | `"paul"`, `"helen"`, or `"unassigned"` for ambiguous readings. Low-cardinality, used for filtering/grouping. **Reserved InfluxQL keyword** — must be double-quoted (`"user"`) in hand-written InfluxQL (shell, curl, ad-hoc queries). Not an issue in the Python `influxdb` client, which handles quoting internally. |
+| `user` | tag | `"user1"`, `"user2"`, or `"unassigned"` for ambiguous readings. Low-cardinality, used for filtering/grouping. **Reserved InfluxQL keyword** — must be double-quoted (`"user"`) in hand-written InfluxQL (shell, curl, ad-hoc queries). Not an issue in the Python `influxdb` client, which handles quoting internally. |
 | `weight_kg` | field, float | Always true kilograms, converted regardless of the scale's physical unit setting (lbs/catty are converted at parse time). |
 | `impedance_ohm` | field, integer | Raw impedance reading from the advertisement. |
 | `unit_name` | field, string | `"kg"`, `"lbs"`, or `"catty"` — the scale's unit setting at the time of that reading. Queried via `last("unit_name")` to answer `--get-info`'s "what unit is the scale in" question. No live-BLE-scan fallback — if InfluxDB is disabled, unreachable, or has no data yet, `--get-info` simply omits the unit line (accepted tradeoff, documented separately). |
 | `confidence` | field, float | 0–1 classifier confidence for the `user` assignment. Mathematically derivable from the two `dist_*` fields (it's the normalized gap between them) but stored directly for query convenience. |
 | `session_id` | field, string | Links back to the BLE session-tracking log line for that reading (e.g. `0C9541886000E:003`), for debugging a specific stored value against the application log. |
-| `dist_paul` | field, float | Penalized Mahalanobis distance from this reading to Paul's Kalman filter state at classification time — the raw score the classifier used to decide the assignment. |
-| `dist_helen` | field, float | Same, for Helen. |
+| `dist_user1` | field, float | Penalized Mahalanobis distance from this reading to user1's Kalman filter state at classification time — the raw score the classifier used to decide the assignment. |
+| `dist_user2` | field, float | Same, for user2. |
 
 ## Derived body metrics (optional fields)
 
@@ -41,5 +41,5 @@ Written only on successfully-assigned readings (never on `user="unassigned"`), a
 ## Example write (line protocol)
 
 ```
-weight,user=paul weight_kg=66.8,impedance_ohm=480i,unit_name="kg",confidence=1.0,session_id="0C9541886000E:003",dist_paul=1.76,dist_helen=5.02,bmi=22.35,bmr=1465.2,fat_percent_est=24.0,water_percent_est=59.1,lean_mass_kg_est=54.2
+weight,user=user1 weight_kg=66.8,impedance_ohm=480i,unit_name="kg",confidence=1.0,session_id="0C9541886000E:003",dist_user1=1.76,dist_user2=5.02,bmi=22.35,bmr=1465.2,fat_percent_est=24.0,water_percent_est=59.1,lean_mass_kg_est=54.2
 ```
