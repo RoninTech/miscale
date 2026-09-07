@@ -79,3 +79,35 @@ database = "miscale"
 retention_policy = "autogen"
 # Turns on the influxdb handling otherwise only logging occurs.
 enabled = true
+
+[ntfy]
+# Ambiguous-reading confirmation via a self-hosted ntfy server on your LAN.
+# When enabled, an ambiguous reading is held (not written to InfluxDB) and
+# a notification is sent with one tap button per user plus "Neither" —
+# tapping resolves it immediately. Unanswered readings are written as
+# "unassigned" after pending_timeout_hours, same as when this is disabled.
+enabled = false
+ 
+# Your self-hosted ntfy server, reachable from your phone over LAN.
+base_url = "http://ntfy.local"
+ 
+# Two distinct topics: your phone subscribes to `topic` to receive the
+# notification; `reply_topic` is where tapping a button POSTs the answer,
+# and what this script long-polls to hear about it. Pick anything —
+# since this is LAN-only and self-hosted, no need for a random/secret name.
+topic = "miscale-ambiguous"
+reply_topic = "miscale-ambiguous-reply"
+ 
+# How long to wait for a reply before giving up and writing the reading
+# as "unassigned".
+pending_timeout_hours = 24
+ 
+# Where ambiguous readings awaiting a reply are persisted between restarts.
+pending_file = "~/.cache/miscale/pending_confirmations.json"
+
+# Optionally also push every successfully-attributed reading (auto or
+# manually confirmed) to its own per-user topic — e.g. "paul" gets
+# notified on "miscale_paul_weight_reading" only, never sees Helen's.
+# {user} is replaced with the config key (paul/helen).
+send_weight_readings = false
+weight_reading_topic_template = "miscale_{user}_weight_reading"

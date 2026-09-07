@@ -10,7 +10,12 @@ import asyncio
 import json
 import logging
 import os
+import queue
 import sys
+import threading
+import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -473,6 +478,8 @@ class DetectionResult:
     confidence: float                  # 0..1
     distances: dict                    # user_id -> penalized distance
     reason: str
+    gap: float = 0.0                   # second-best - best distance
+    threshold: float = 0.0             # confidence_gap_threshold at classification time
 
 
 class UserDetector:
@@ -621,7 +628,8 @@ class UserDetector:
         if len(ranked) == 1:
             best_user, best_score = ranked[0]
             self._commit(best_user, z, timestamp)
-            return DetectionResult(best_user, 1.0, scores, "only_user_configured")
+            return DetectionResult(best_user, 1.0, scores, "only_user_configured",
+                                    gap=0.0, threshold=self.confidence_gap_threshold)
 
         (best_user, best_score), (_, second_score) = ranked[0], ranked[1]
         gap = second_score - best_score
@@ -632,11 +640,13 @@ class UserDetector:
                 1.0 - min(gap / self.confidence_gap_threshold, 1.0),
                 scores,
                 "low_confidence_gap",
+                gap=gap, threshold=self.confidence_gap_threshold,
             )
 
         confidence = min(gap / (self.confidence_gap_threshold * 3), 1.0)
         self._commit(best_user, z, timestamp)
-        return DetectionResult(best_user, confidence, scores, "clear_winner")
+        return DetectionResult(best_user, confidence, scores, "clear_winner",
+                                gap=gap, threshold=self.confidence_gap_threshold)
 
     def _commit(self, user_id: str, z: np.ndarray, timestamp: datetime) -> None:
         """Kalman-update the winning user's filter and persist state."""
@@ -649,6 +659,19 @@ class UserDetector:
         state.P = (np.eye(2) - K) @ state.P
         state.last_seen = timestamp
         self._save_persisted_state()
+
+    def manual_commit(self, user_id: str, weight_kg: float,
+                       impedance_ohm: Optional[float], timestamp: datetime) -> bool:
+        """Commit a human-confirmed assignment exactly like a clear
+        classifier win — updates that user's Kalman filter and persists
+        state. Returns False if user_id isn't recognized."""
+        if user_id not in self.states:
+            self.logger.warning("manual_commit: unknown user_id '%s' — ignoring", user_id)
+            return False
+        impedance = impedance_ohm if impedance_ohm else self.states[user_id].x[1]
+        z = np.array([weight_kg, float(impedance)])
+        self._commit(user_id, z, timestamp)
+        return True
 
     def name_for(self, user_id: Optional[str]) -> str:
         if user_id is None:
@@ -923,6 +946,246 @@ class InfluxDBWriter:
 
 
 # ---------------------------------------------------------------------------
+# ntfy ambiguous-reading confirmation
+# ---------------------------------------------------------------------------
+#
+# Ambiguous readings are held (not written to InfluxDB) until resolved:
+# a notification is sent to a self-hosted ntfy topic with one tap-action
+# button per configured user; tapping one POSTs a reply to a second
+# ("reply") topic, which a background thread long-polls. A resolved
+# reading is committed to that user's Kalman filter exactly like a clear
+# classifier win, then written to InfluxDB with manual_override=true.
+# Anything left unanswered past pending_timeout_hours is written as
+# "unassigned", same as today's default behaviour.
+#
+# Reply encoding is deliberately a plain "session_id|user_id" string
+# rather than JSON, to sidestep ntfy's Actions header needing its
+# delimiter characters (commas/semicolons) escaped inside a JSON body.
+
+
+class PendingConfirmations:
+    """Durable (JSON file-backed) queue of ambiguous readings awaiting a
+    human confirmation reply. Survives process restarts since a reply
+    could arrive minutes, hours, or never."""
+
+    def __init__(self, path: Path, logger: logging.Logger):
+        self.path = path
+        self.logger = logger
+        self._data: dict = self._load()
+
+    def _load(self) -> dict:
+        if not self.path.exists():
+            return {}
+        try:
+            with open(self.path, "r") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError) as exc:
+            self.logger.warning(
+                "Could not read pending confirmations file (%s) — starting fresh", exc
+            )
+            return {}
+
+    def _save(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = self.path.with_suffix(".tmp")
+        with open(tmp_path, "w") as f:
+            json.dump(self._data, f, indent=2)
+        tmp_path.replace(self.path)
+
+    def add(self, session_id: str, reading: dict, distances: dict, confidence: float) -> None:
+        self._data[session_id] = {
+            "weight_kg": reading["weight_kg"],
+            "impedance_ohm": reading.get("impedance_ohm"),
+            "timestamp": reading["timestamp"].isoformat(),
+            "unit_name": reading.get("unit_name"),
+            "distances": distances,
+            "confidence": confidence,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        self._save()
+
+    def pop(self, session_id: str) -> Optional[dict]:
+        entry = self._data.pop(session_id, None)
+        if entry is not None:
+            self._save()
+        return entry
+
+    def pop_expired(self, timeout_hours: float) -> dict:
+        now = datetime.now(timezone.utc)
+        expired = {}
+        for sid, entry in list(self._data.items()):
+            created = datetime.fromisoformat(entry["created_at"])
+            if (now - created).total_seconds() > timeout_hours * 3600:
+                expired[sid] = self._data.pop(sid)
+        if expired:
+            self._save()
+        return expired
+
+    @staticmethod
+    def entry_to_reading(entry: dict) -> dict:
+        """Reconstruct a reading dict (as parse_advertisement would
+        produce) from a stored pending entry, for re-use with
+        write_reading()/manual_commit()."""
+        return {
+            "weight_kg": entry["weight_kg"],
+            "impedance_ohm": entry.get("impedance_ohm"),
+            "timestamp": datetime.fromisoformat(entry["timestamp"]),
+            "unit_name": entry.get("unit_name"),
+        }
+
+
+def send_ambiguous_notification(base_url: str, topic: str, reply_topic: str,
+                                 session_id: str, reading: dict, distances: dict,
+                                 user_ids: list, logger: logging.Logger) -> None:
+    """Publish an ntfy notification with one tap-action button per user.
+    Tapping a button POSTs "<session_id>|<user_id>" to reply_topic."""
+    reply_url = f"{base_url.rstrip('/')}/{reply_topic}"
+
+    actions = "; ".join(
+        f'http, {uid.capitalize()}, {reply_url}, method=POST, '
+        f'body="{session_id}|{uid}", clear=true'
+        for uid in user_ids
+    )
+    actions += f'; http, Neither, {reply_url}, method=POST, body="{session_id}|__skip__", clear=true'
+
+    dist_str = ", ".join(f"{u}={d:.2f}" for u, d in distances.items())
+    message = (
+        f"Weight: {reading['weight_kg']:.2f} kg"
+        + (f", impedance: {reading['impedance_ohm']} \u03a9" if reading.get("impedance_ohm") else "")
+        + f"\nDistances: {dist_str}"
+        + "\nWho was this for?"
+    )
+
+    url = f"{base_url.rstrip('/')}/{topic}"
+    req = urllib.request.Request(
+        url,
+        data=message.encode("utf-8"),
+        method="POST",
+        headers={
+            "Title": "Ambiguous scale reading",
+            "Priority": "default",
+            "Actions": actions,
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            status = resp.status
+            body = resp.read().decode("utf-8", errors="replace")
+        logger.info(
+            "[%s] Sent ntfy confirmation request to topic '%s' (HTTP %d, response: %s)",
+            session_id, topic, status, body.strip() or "<empty>",
+        )
+    except (urllib.error.URLError, OSError) as exc:
+        logger.warning(
+            "[%s] Failed to send ntfy notification to topic '%s': %s", session_id, topic, exc
+        )
+
+
+def send_weight_reading_notification(base_url: str, topic_template: str, user_id: str,
+                                      user_name: str, reading: dict, metrics: dict,
+                                      manual_override: bool, logger: logging.Logger) -> None:
+    """Publish a plain FYI notification with a user's latest reading to
+    their own dedicated ntfy topic, e.g. "miscale_paul_weight_reading".
+    No action buttons — just a push, independent of the ambiguous-reading
+    confirmation flow (this fires for every successfully-attributed
+    reading, auto-classified or manually confirmed)."""
+    topic = topic_template.format(user=user_id)
+
+    lines = [f"Weight: {reading['weight_kg']:.2f} kg"]
+    if reading.get("impedance_ohm"):
+        lines.append(f"Impedance: {reading['impedance_ohm']} \u03a9")
+    if "bmi" in metrics:
+        lines.append(f"BMI: {metrics['bmi']}")
+    if "bmr" in metrics:
+        lines.append(f"BMR: {metrics['bmr']} kcal/day")
+    if "fat_percent_est" in metrics:
+        lines.append(f"Body fat (est): {metrics['fat_percent_est']}%")
+    if "water_percent_est" in metrics:
+        lines.append(f"Body water (est): {metrics['water_percent_est']}%")
+    if "lean_mass_kg_est" in metrics:
+        lines.append(f"Lean mass (est): {metrics['lean_mass_kg_est']} kg")
+    if manual_override:
+        lines.append("(manually confirmed)")
+    message = "\n".join(lines)
+
+    url = f"{base_url.rstrip('/')}/{topic}"
+    req = urllib.request.Request(
+        url,
+        data=message.encode("utf-8"),
+        method="POST",
+        headers={
+            "Title": f"{user_name} - new weight reading",
+            "Priority": "low",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            status = resp.status
+            body = resp.read().decode("utf-8", errors="replace")
+        logger.info(
+            "[%s] Sent weight-reading notification to topic '%s' (HTTP %d, response: %s)",
+            user_id, topic, status, body.strip() or "<empty>",
+        )
+    except (urllib.error.URLError, OSError) as exc:
+        logger.warning(
+            "[%s] Failed to send weight-reading notification to topic '%s': %s",
+            user_id, topic, exc,
+        )
+
+
+def _parse_ntfy_reply_line(raw_line: bytes) -> Optional[dict]:
+    """Parse one line of ntfy's /json subscription stream. Returns
+    {"session_id": ..., "user": ...} for a valid reply message, else None."""
+    line = raw_line.decode("utf-8").strip()
+    if not line:
+        return None
+    try:
+        msg = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    if msg.get("event") != "message":
+        return None
+    body = msg.get("message", "")
+    if "|" not in body:
+        return None
+    session_id, _, user_id = body.partition("|")
+    if not session_id or not user_id:
+        return None
+    return {"session_id": session_id, "user": user_id}
+
+
+def _ntfy_listener_thread(base_url: str, reply_topic: str,
+                           stop_event: threading.Event,
+                           out_queue: "queue.Queue",
+                           logger: logging.Logger) -> None:
+    """Long-polls the ntfy reply topic in a background thread, pushing
+    parsed {session_id, user} dicts onto out_queue as replies arrive.
+    Reconnects automatically on any error (network hiccup, LAN-only ntfy
+    server briefly unreachable, phone's action POST timing out, etc.)."""
+    url = f"{base_url.rstrip('/')}/{reply_topic}/json"
+    while not stop_event.is_set():
+        try:
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req, timeout=90) as resp:
+                logger.info("ntfy listener connected to %s", url)
+                while not stop_event.is_set():
+                    raw_line = resp.readline()
+                    if not raw_line:
+                        break  # connection closed by server — reconnect
+                    reply = _parse_ntfy_reply_line(raw_line)
+                    if reply is not None:
+                        logger.info(
+                            "ntfy listener received reply: session=%s user=%s",
+                            reply["session_id"], reply["user"],
+                        )
+                        out_queue.put(reply)
+        except Exception as exc:
+            if not stop_event.is_set():
+                logger.warning("ntfy listener lost connection, reconnecting: %s", exc)
+                time.sleep(5)
+
+
+# ---------------------------------------------------------------------------
 # Main scanner
 # ---------------------------------------------------------------------------
 
@@ -957,6 +1220,45 @@ async def run_scanner(config: dict, logger: logging.Logger) -> None:
     influx_cfg = config.get("influxdb", {})
     influx_writer = InfluxDBWriter(influx_cfg, logger)
 
+    # Ambiguous-reading confirmation via ntfy (optional)
+    ntfy_cfg = config.get("ntfy", {})
+    ntfy_enabled = ntfy_cfg.get("enabled", False)
+    ntfy_base_url = ntfy_cfg.get("base_url", "https://ntfy.sh")
+    ntfy_topic = ntfy_cfg.get("topic", "")
+    ntfy_reply_topic = ntfy_cfg.get("reply_topic", "")
+    ntfy_timeout_hours = ntfy_cfg.get("pending_timeout_hours", 24)
+    ntfy_send_weight_readings = ntfy_cfg.get("send_weight_readings", False)
+    ntfy_weight_topic_template = ntfy_cfg.get(
+        "weight_reading_topic_template", "miscale_{user}_weight_reading"
+    )
+    pending_confirmations_file = Path(
+        ntfy_cfg.get("pending_file", "~/.cache/miscale/pending_confirmations.json")
+    ).expanduser()
+    pending_confirmations = PendingConfirmations(pending_confirmations_file, logger)
+
+    ntfy_reply_queue: "queue.Queue" = queue.Queue()
+    ntfy_stop_event = threading.Event()
+    ntfy_thread: Optional[threading.Thread] = None
+
+    if ntfy_enabled:
+        if not ntfy_topic or not ntfy_reply_topic:
+            logger.warning(
+                "ntfy.enabled = true but topic/reply_topic aren't both set — "
+                "ambiguous-reading confirmations are disabled for this run."
+            )
+            ntfy_enabled = False
+        else:
+            ntfy_thread = threading.Thread(
+                target=_ntfy_listener_thread,
+                args=(ntfy_base_url, ntfy_reply_topic, ntfy_stop_event,
+                      ntfy_reply_queue, logger),
+                daemon=True,
+            )
+            ntfy_thread.start()
+            logger.info(
+                "ntfy confirmation listener started (%s/%s)", ntfy_base_url, ntfy_reply_topic
+            )
+
     logger.info(
         "Starting Mi Scale BLE monitor (adapter=%s, interval=%ds)",
         hci_device,
@@ -966,6 +1268,40 @@ async def run_scanner(config: dict, logger: logging.Logger) -> None:
         logger.info("Monitoring scale MAC: %s", mac.upper())
     else:
         logger.info("Monitoring all devices (no MAC filter)")
+
+    # Log the actual effective values (including defaults applied where the
+    # config file omitted a key) so it's obvious whether a config edit and
+    # restart actually took effect, without needing to re-read the toml.
+    logger.info("Effective configuration:")
+    logger.info(
+        "  [scan] mac=%s hci_device=%s scan_interval=%ds session_gap_seconds=%ds",
+        mac or "<all>", hci_device, scan_interval, session_gap,
+    )
+    logger.info(
+        "  [detection] confidence_gap_threshold=%.3f max_plausible_delta_kg_per_day=%.3f "
+        "max_intraday_delta_kg=%.3f max_plausibility_penalty=%.3f",
+        detector.confidence_gap_threshold, detector.max_plausible_delta_kg_per_day,
+        detector.max_intraday_delta_kg, detector.max_plausibility_penalty,
+    )
+    logger.info(
+        "  [detection] process_var_weight=%.4f process_var_impedance=%.4f "
+        "meas_var_weight=%.4f meas_var_impedance=%.4f default_start_impedance=%.1f",
+        detector.process_var_weight, detector.process_var_impedance,
+        detector.meas_var_weight, detector.meas_var_impedance,
+        detector.default_start_impedance,
+    )
+    logger.info("  [detection] state_file=%s", state_file)
+    logger.info(
+        "  [influxdb] enabled=%s host=%s port=%s database=%s",
+        influx_writer.enabled, influx_cfg.get("host", "localhost"),
+        influx_cfg.get("port", 8086), influx_cfg.get("database", "miscale"),
+    )
+    logger.info(
+        "  [ntfy] enabled=%s base_url=%s topic=%s reply_topic=%s "
+        "pending_timeout_hours=%s send_weight_readings=%s weight_reading_topic_template=%s",
+        ntfy_enabled, ntfy_base_url, ntfy_topic or "<unset>", ntfy_reply_topic or "<unset>",
+        ntfy_timeout_hours, ntfy_send_weight_readings, ntfy_weight_topic_template,
+    )
 
     if influx_writer.enabled:
         logger.info("InfluxDB logging enabled at %s:%d/%s",
@@ -1070,37 +1406,124 @@ async def run_scanner(config: dict, logger: logging.Logger) -> None:
                         if result.assignment is None:
                             logger.warning(
                                 "[%s] Ambiguous reading (weight=%.2f kg, impedance=%d Ω) "
-                                "— distances=%s, reason=%s. Not auto-assigned.",
+                                "— distances=%s, gap=%.2f (threshold=%.2f), reason=%s. "
+                                "Not auto-assigned.",
                                 session_id, reading["weight_kg"], imp,
                                 {uid: round(d, 2) for uid, d in result.distances.items()},
+                                result.gap, result.threshold,
                                 result.reason,
                             )
-                            influx_writer.write_reading(
-                                session_id, "unassigned", reading, result.confidence,
-                                result.distances,
-                            )
+                            if ntfy_enabled:
+                                pending_confirmations.add(
+                                    session_id, reading, result.distances, result.confidence
+                                )
+                                send_ambiguous_notification(
+                                    ntfy_base_url, ntfy_topic, ntfy_reply_topic,
+                                    session_id, reading, result.distances,
+                                    list(detector.states.keys()), logger,
+                                )
+                            else:
+                                influx_writer.write_reading(
+                                    session_id, "unassigned", reading, result.confidence,
+                                    result.distances,
+                                )
                         else:
                             metrics = compute_derived_metrics(
                                 user_info_cfg, result.assignment, reading["weight_kg"]
                             )
                             logger.info(
                                 "[%s] Detected user: %s (confidence %.2f, "
-                                "distances=%s)%s",
+                                "distances=%s, gap=%.2f (threshold=%.2f))%s",
                                 session_id,
                                 detector.name_for(result.assignment),
                                 result.confidence,
                                 {uid: round(d, 2) for uid, d in result.distances.items()},
+                                result.gap, result.threshold,
                                 f", metrics={metrics}" if metrics else "",
                             )
                             influx_writer.write_reading(
                                 session_id, result.assignment, reading, result.confidence,
                                 result.distances, metrics,
                             )
+                            if ntfy_send_weight_readings:
+                                send_weight_reading_notification(
+                                    ntfy_base_url, ntfy_weight_topic_template,
+                                    result.assignment, detector.name_for(result.assignment),
+                                    reading, metrics, False, logger,
+                                )
+
+                # Process any ntfy confirmation replies
+                while not ntfy_reply_queue.empty():
+                    reply = ntfy_reply_queue.get()
+                    sid = reply["session_id"]
+                    chosen_user = reply["user"]
+                    logger.info(
+                        "[%s] Processing ntfy reply: user=%s", sid, chosen_user
+                    )
+
+                    entry = pending_confirmations.pop(sid)
+                    if entry is None:
+                        logger.debug(
+                            "Received confirmation for unknown/already-resolved "
+                            "session %s — ignoring", sid,
+                        )
+                        continue
+
+                    resolved_reading = PendingConfirmations.entry_to_reading(entry)
+
+                    if chosen_user == "__skip__":
+                        logger.info("[%s] Marked 'Neither' via ntfy — writing as unassigned", sid)
+                        influx_writer.write_reading(
+                            sid, "unassigned", resolved_reading,
+                            entry.get("confidence", 0.0), entry.get("distances", {}),
+                        )
+                        continue
+
+                    if not detector.manual_commit(
+                        chosen_user, resolved_reading["weight_kg"],
+                        resolved_reading.get("impedance_ohm"), resolved_reading["timestamp"],
+                    ):
+                        logger.warning(
+                            "[%s] Confirmation named unrecognized user '%s' — ignoring",
+                            sid, chosen_user,
+                        )
+                        continue
+
+                    metrics = compute_derived_metrics(
+                        user_info_cfg, chosen_user, resolved_reading["weight_kg"]
+                    )
+                    logger.info(
+                        "[%s] Manually confirmed as %s via ntfy",
+                        sid, detector.name_for(chosen_user),
+                    )
+                    influx_writer.write_reading(
+                        sid, chosen_user, resolved_reading, 1.0,
+                        entry.get("distances", {}), {**metrics, "manual_override": True},
+                    )
+                    if ntfy_send_weight_readings:
+                        send_weight_reading_notification(
+                            ntfy_base_url, ntfy_weight_topic_template,
+                            chosen_user, detector.name_for(chosen_user),
+                            resolved_reading, metrics, True, logger,
+                        )
+
+                # Sweep pending confirmations that timed out with no reply
+                if ntfy_enabled:
+                    for sid, entry in pending_confirmations.pop_expired(ntfy_timeout_hours).items():
+                        logger.warning(
+                            "[%s] Ambiguous reading timed out waiting for confirmation "
+                            "(%.0fh) — writing as unassigned", sid, ntfy_timeout_hours,
+                        )
+                        influx_writer.write_reading(
+                            sid, "unassigned", PendingConfirmations.entry_to_reading(entry),
+                            entry.get("confidence", 0.0), entry.get("distances", {}),
+                        )
 
                 await asyncio.sleep(scan_interval)
         except asyncio.CancelledError:
             logger.info("Scanner cancelled")
         finally:
+            ntfy_stop_event.set()
             influx_writer.close()
 
 
