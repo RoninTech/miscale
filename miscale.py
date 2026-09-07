@@ -62,6 +62,18 @@ UNIT_CATTY = 0x04
 
 UNIT_NAMES = {UNIT_KG: "kg", UNIT_LBS: "lbs", UNIT_CATTY: "catty"}
 
+# Unit codes for the scale configuration write command (0x06 0x04 0x00 [unit])
+CONFIG_UNIT_KG = 0x00
+CONFIG_UNIT_LBS = 0x01
+CONFIG_UNIT_CATTY = 0x02
+
+CONFIG_UNIT_MAP = {
+    "kg": CONFIG_UNIT_KG,
+    "lbs": CONFIG_UNIT_LBS,
+    "catty": CONFIG_UNIT_CATTY,
+    "jin": CONFIG_UNIT_CATTY,
+}
+
 # Conversion factors to true kilograms. "Catty" here is the Chinese
 # market catty/jin used by Xiaomi scales (0.5 kg), not the Imperial catty.
 LBS_TO_KG = 0.45359237
@@ -152,6 +164,37 @@ async def set_scale_time(mac: str, logger: logging.Logger) -> None:
             )
     except Exception as exc:
         logger.warning("Failed to set scale clock: %s", exc)
+
+
+async def set_scale_unit(mac: str, unit: str, logger: logging.Logger) -> None:
+    """Connect to the scale and set its display unit (kg / lbs / catty).
+
+    Sends a write command to the Huami Configuration characteristic
+    (00001542): 0x06 0x04 0x00 [unit_code].
+    """
+    unit_lower = unit.lower()
+    if unit_lower not in CONFIG_UNIT_MAP:
+        logger.error(
+            "Unknown display unit '%s'. Supported units: kg, lbs, catty (jin)",
+            unit,
+        )
+        sys.exit(1)
+
+    unit_code = CONFIG_UNIT_MAP[unit_lower]
+    payload = bytes([0x06, 0x04, 0x00, unit_code])
+    mac_upper = mac.upper()
+    logger.info(
+        "Connecting to scale %s to set display unit to %s (0x%02x)...",
+        mac_upper, unit_lower, unit_code,
+    )
+    try:
+        async with BleakClient(mac, timeout=10.0) as client:
+            await client.write_gatt_char(CHAR_CONFIG, payload, response=False)
+            logger.info(
+                "Display unit set to %s on scale %s", unit_lower, mac_upper,
+            )
+    except Exception as exc:
+        logger.warning("Failed to set scale display unit: %s", exc)
 
 
 async def get_scale_info(mac: str, logger: logging.Logger, config: dict) -> None:
@@ -1660,6 +1703,12 @@ def main():
         action="store_true",
         help="Set the scale's internal clock to the current time and exit",
     )
+    parser.add_argument(
+        "-u", "--set-unit",
+        metavar="UNIT",
+        choices=["kg", "lbs", "catty", "jin"],
+        help="Set the scale display unit and exit (kg, lbs, catty/jin)",
+    )
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -1692,6 +1741,16 @@ def main():
             logger.error("No scale MAC configured in [scan] section")
             sys.exit(1)
         asyncio.run(set_scale_time(mac, logger))
+        return
+
+    # One-shot display unit setting
+    if args.set_unit:
+        scan_cfg = config.get("scan", {})
+        mac = scan_cfg.get("scale_mac", "")
+        if not mac:
+            logger.error("No scale MAC configured in [scan] section")
+            sys.exit(1)
+        asyncio.run(set_scale_unit(mac, args.set_unit, logger))
         return
 
     try:

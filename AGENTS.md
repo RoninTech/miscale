@@ -213,7 +213,7 @@ All measurements are stored and processed in **kg** regardless of the scale's di
 - Remote zero calibration (`0x06 0x05 0x00 0x00`) — requires idle scale on flat surface
 - Factory self-test diagnostics (`0x04 0x01` / `0x04 0x04`) — lights all LEDs, runs BIA circuit tests
 - LED display on/off control (`0x04 0x02` / `0x04 0x03`)
-- Display unit configuration (`0x06 0x04 0x00 [unit]`) — kg/lbs/jin
+- Display unit configuration (`0x06 0x04 0x00 [unit]`) — kg/lbs/jin (`-u` flag)
 - Balance test / one-foot measure mode (`0x06 0x0f 0x00 0x00`)
   - Streams real-time duration data via notify subscription
   - `flags 0x01` = active, `0x02` = stopped
@@ -286,6 +286,6 @@ Clean raw hex capture:
 - [ ] Stage 4: Implement GATT config commands via `00001542`
 - [ ] Stage 4: Add zero calibration command
 - [ ] Stage 4: Add LED display on/off control
-- [ ] Stage 4: Implement display unit configuration (write to `00001542`)
+- [x] Stage 4: Implement display unit configuration (write to `00001542`)
 - [ ] Stage 4: Implement balance test / one-foot measure mode
 - [ ] Stage 4: Add erase history command (with confirmation)
