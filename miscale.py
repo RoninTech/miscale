@@ -1425,38 +1425,38 @@ async def run_scanner(config: dict, logger: logging.Logger) -> None:
     # Log the actual effective values (including defaults applied where the
     # config file omitted a key) so it's obvious whether a config edit and
     # restart actually took effect, without needing to re-read the toml.
-    logger.info("Effective configuration:")
-    logger.info(
+    logger.debug("Effective configuration:")
+    logger.debug(
         "  [scan] mac=%s hci_device=%s scan_interval=%ds session_gap_seconds=%ds",
         mac or "<all>", hci_device, scan_interval, session_gap,
     )
-    logger.info(
+    logger.debug(
         "  [detection] confidence_gap_threshold=%.3f max_plausible_delta_kg_per_day=%.3f "
         "max_intraday_delta_kg=%.3f max_plausibility_penalty=%.3f",
         detector.confidence_gap_threshold, detector.max_plausible_delta_kg_per_day,
         detector.max_intraday_delta_kg, detector.max_plausibility_penalty,
     )
-    logger.info(
+    logger.debug(
         "  [detection] process_var_weight=%.4f process_var_impedance=%.4f "
         "meas_var_weight=%.4f meas_var_impedance=%.4f default_start_impedance=%.1f",
         detector.process_var_weight, detector.process_var_impedance,
         detector.meas_var_weight, detector.meas_var_impedance,
         detector.default_start_impedance,
     )
-    logger.info("  [detection] state_file=%s", state_file)
-    logger.info(
+    logger.debug("  [detection] state_file=%s", state_file)
+    logger.debug(
         "  [influxdb] enabled=%s host=%s port=%s database=%s",
         influx_writer.enabled, influx_cfg.get("host", "localhost"),
         influx_cfg.get("port", 8086), influx_cfg.get("database", "miscale"),
     )
-    logger.info(
+    logger.debug(
         "  [influxdb] startup_retries=%s startup_retry_delay_seconds=%s "
         "reconnect_interval_seconds=%s",
         influx_cfg.get("startup_retries", 6),
         influx_cfg.get("startup_retry_delay_seconds", 5),
         influx_cfg.get("reconnect_interval_seconds", 60),
     )
-    logger.info(
+    logger.debug(
         "  [ntfy] enabled=%s base_url=%s topic=%s reply_topic=%s "
         "pending_timeout_hours=%s send_weight_readings=%s weight_reading_topic_template=%s",
         ntfy_enabled, ntfy_base_url, ntfy_topic or "<unset>", ntfy_reply_topic or "<unset>",
@@ -1464,7 +1464,7 @@ async def run_scanner(config: dict, logger: logging.Logger) -> None:
     )
 
     if influx_writer.enabled:
-        logger.info("InfluxDB logging enabled at %s:%d/%s",
+        logger.debug("InfluxDB logging enabled at %s:%d/%s",
                      influx_cfg.get("host", "localhost"),
                      influx_cfg.get("port", 8086),
                      influx_cfg.get("database", "miscale"))
