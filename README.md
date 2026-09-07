@@ -164,7 +164,7 @@ Measurement `weight`, one point per finalized reading:
 
 ## Known limitations
 
-- `--get-info`'s "what unit is the scale in" answer only checks InfluxDB's
+- `-i or --get-info`'s "what unit is the scale in" answer only checks InfluxDB's
   most recent reading — if InfluxDB is disabled, unreachable, or has no data
   yet, it simply omits that line. No live-BLE fallback (accepted tradeoff).
 - ntfy's `base_url` is auto-detected from your machine's LAN-facing IP by
