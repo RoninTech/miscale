@@ -1211,7 +1211,7 @@ def send_weight_reading_notification(base_url: str, topic_template: str, user_id
                                       user_name: str, reading: dict, metrics: dict,
                                       manual_override: bool, logger: logging.Logger) -> None:
     """Publish a plain FYI notification with a user's latest reading to
-    their own dedicated ntfy topic, e.g. "miscale_paul_weight_reading".
+    their own dedicated ntfy topic, e.g. "miscale_user1_weight_reading".
     No action buttons — just a push, independent of the ambiguous-reading
     confirmation flow (this fires for every successfully-attributed
     reading, auto-classified or manually confirmed)."""

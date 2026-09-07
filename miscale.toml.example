@@ -130,8 +130,8 @@ pending_timeout_hours = 24
 pending_file = "~/.cache/miscale/pending_confirmations.json"
 
 # Optionally also push every successfully-attributed reading (auto or
-# manually confirmed) to its own per-user topic — e.g. "paul" gets
-# notified on "miscale_paul_weight_reading" only, never sees Helen's.
-# {user} is replaced with the config key (paul/helen).
+# manually confirmed) to its own per-user topic — e.g. "user1" gets
+# notified on "miscale_user1_weight_reading" only, never sees user2's.
+# {user} is replaced with the config key (user1/user2).
 send_weight_readings = false
 weight_reading_topic_template = "miscale_{user}_weight_reading"
