@@ -190,13 +190,23 @@ All measurements are stored and processed in **kg** regardless of the scale's di
 - Confidence gating: ambiguous readings are tagged `user="unassigned"`
 - Filter state persisted to JSON sidecar between runs
 - Configurable InfluxDB connection settings in `miscale.toml`
-- Measurements written to `scale_reading` measurement with tags: session, user; fields: weight_kg, impedance_ohm, confidence
+- Measurements written to `weight` measurement with tags: user; fields: weight_kg, impedance_ohm, confidence, session_id, unit_name, dist_* (one per user)
+- Derived body metrics stored as fields: bmi, bmr, fat_percent_est, water_percent_est, lean_mass_kg_est
 - InfluxDB enabled/disabled via `[influxdb] enabled = true/false`
+- Dynamic `dist_<user_id>` fields generated from `[user_info]` keys — field names change if users are added/renamed
+- Ambiguous reading confirmation via self-hosted ntfy server: sends notification with per-user tap buttons, background thread long-polls reply topic, resolved readings commit to Kalman filter and InfluxDB; timeout writes as "unassigned"
+- Per-user weight-reading notifications: optional push to per-user ntfy topic (e.g. `miscale_{user}_weight_reading`) for every successfully-attributed reading
+- Pending confirmations persisted to JSON sidecar (`pending_confirmations.json`) so replies survive process restarts
+- Auto-detection of machine's LAN IP for ntfy base_url (configurable override via `ntfy.base_url`)
 
 ### Stage 3 — Daemon
-- systemd service unit
-- Auto-start on boot
-- Log rotation 
+- systemd service unit (`/etc/systemd/system/miscale.service`)
+- Runs as a user (not root, no special BLE permissions needed)
+- Auto-start on boot via `WantedBy=multi-user.target`
+- Depends on `bluetooth.target` and `network-online.target` (BlueZ up before scanning, network up before InfluxDB/ntfy)
+- `Restart=on-failure` with 10s delay (auto-recovery from crashes)
+- Logs via `journalctl -u miscale -f` (live tail) — also writes to `miscale.log` via Python logging module
+- Crash traces go to journal (stderr), not miscale.log
 
 ### Stage 4 — Advanced Configuration & Diagnostics
 - GATT-based device configuration via `00001542` characteristic (Huami Config service)
@@ -259,20 +269,23 @@ Clean raw hex capture:
 - [x] Stage 1: Create BLE scanner with bleak (detection callback pattern)
 - [x] Stage 1: Implement advertisement parser for V2 protocol
 - [x] Stage 1: Add logging (console + file, configurable levels)
-- [x] Stage 1: Deduplicate readings (same weight within 30s window)
+- [x] Stage 1: Deduplicate readings (same weight+impedance within 3s window)
 - [x] Resolve protocol questions → update parser accordingly
 - [x] Stage 1: Implement measurement session tracking
 - [x] Stage 1: Add `-i` flag for device info (DIS + battery)
 - [x] Stage 1: Add `-t` flag to set scale internal clock
-- [x] Stage 1: Add `-u` flag to set scale display unit (kg/lbs/jin)
+- [ ] Stage 1: Add `-u` flag to set scale display unit (kg/lbs/jin)
 - [x] Stage 2: Add InfluxDB writer
 - [x] Stage 2: Implement user auto-detection with Kalman filter (weight + impedance)
 - [x] Stage 2: Compute derived body metrics and store in DB
-- [ ] Stage 3: Create systemd service unit
-- [ ] Stage 3: Test daemon lifecycle
+- [x] Stage 2: Add ntfy ambiguous-reading confirmation (tap-action buttons, reply polling, timeout)
+- [x] Stage 2: Add per-user weight-reading notifications via ntfy
+- [x] Stage 2: Persist pending confirmations to JSON sidecar
+- [x] Stage 3: Create systemd service unit
+- [x] Stage 3: Test daemon lifecycle
 - [ ] Stage 4: Implement GATT config commands via `00001542`
 - [ ] Stage 4: Add zero calibration command
 - [ ] Stage 4: Add LED display on/off control
-- [x] Stage 4: Add display unit configuration
+- [ ] Stage 4: Implement display unit configuration (write to `00001542`)
 - [ ] Stage 4: Implement balance test / one-foot measure mode
 - [ ] Stage 4: Add erase history command (with confirmation)

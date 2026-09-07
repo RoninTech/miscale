@@ -80,6 +80,20 @@ retention_policy = "autogen"
 # Turns on the influxdb handling otherwise only logging occurs.
 enabled = true
 
+# If InfluxDB isn't reachable yet at startup (e.g. its Docker container is
+# still initializing when this service starts), retry this many times,
+# waiting startup_retry_delay_seconds between attempts, before giving up
+# for the rest of this run's initial connection. Default: 6 retries x 5s
+# = up to ~30s of waiting, without blocking indefinitely if InfluxDB is
+# genuinely down or misconfigured.
+startup_retries = 6
+startup_retry_delay_seconds = 5
+ 
+# After giving up on startup, keep retrying in the background at this
+# interval — self-heals if InfluxDB comes up later or bounces mid-run,
+# without needing to restart this script.
+reconnect_interval_seconds = 60
+
 [ntfy]
 # Ambiguous-reading confirmation via a self-hosted ntfy server on your LAN.
 # When enabled, an ambiguous reading is held (not written to InfluxDB) and

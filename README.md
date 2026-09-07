@@ -16,6 +16,10 @@ Standalone BLE scanner for the **Mi Body Composition Scale 2** (XMTZC05HM) that 
 - Derived body metrics: BMI, BMR, body fat %, water %, lean mass
 - Confidence gating: ambiguous readings tagged as `unassigned`
 - InfluxDB 1.x integration (configurable, enabled/disabled)
+- Ambiguous reading confirmation via self-hosted ntfy server: tap-action buttons per user, background reply polling, timeout fallback
+- Per-user weight-reading notifications via ntfy
+- Pending confirmations persisted to JSON sidecar (survives restarts)
+- systemd daemon service (auto-start on boot, crash recovery, journal logging)
 - GATT-based time sync via `-t` flag to align the scale's internal clock
 - One-shot device info read (System ID, serial, firmware version, battery)
 - Configurable logging to console and file
@@ -157,7 +161,7 @@ A typical entry looks like:
 
 ```json
 {
-  "paul": {
+  "Slartibartfast": {
     "x": [67.08, 600.0],
     "P": [[0.10, 0.0], [0.0, 24.30]],
     "last_seen": "2026-09-06T13:58:14+00:00"
@@ -177,6 +181,8 @@ The `[detection]` section in `miscale.toml` exposes several knobs:
 | `meas_var_impedance` | 25.0 | Expected noise in a single impedance reading |
 | `confidence_gap_threshold` | 1.0 | Minimum separation (Mahalanobis units) between best and second-best user to auto-assign |
 | `max_plausible_delta_kg_per_day` | 2.0 | Max day-over-day weight change before a plausibility penalty applies |
+| `max_intraday_delta_kg` | 1.5 | Same-day fluctuation budget that is never penalized (prevents ordinary swings from triggering penalties) |
+| `max_plausibility_penalty` | 8.0 | Maximum multiplier applied to the Mahalanobis distance for implausible jumps |
 | `default_start_impedance` | 500.0 | Fallback impedance guess when not set per-user |
 
 ## Derived Body Metrics
@@ -193,13 +199,68 @@ When a user has `height`, `age`, and `gender` configured, the scanner computes f
 
 > **Note:** Body fat %, water %, and lean mass are anthropometric estimates using only height, weight, age, and sex — they do not use impedance. True BIA-based body composition requires proprietary coefficients that are not publicly available. The `_est` suffix on these field names in InfluxDB is a permanent reminder of this distinction.
 
+## Ambiguous Reading Confirmation (ntfy)
+
+When the Kalman filter cannot confidently assign a reading to a specific user, the scanner can send a notification to a self-hosted ntfy server with one tap button per configured user. Tapping a button immediately resolves the reading. Unanswered notifications expire after `pending_timeout_hours` and the reading is written as `unassigned`.
+
+### How it works
+
+1. An ambiguous reading triggers an ntfy notification with tap-action buttons
+2. A background thread long-polls a reply topic for the response
+3. The reply is a simple `session_id|user_id` string — no JSON parsing needed on the ntfy side
+4. On tap: the reading commits to the chosen user's Kalman filter and InfluxDB
+5. On "Neither": the reading is written as `unassigned`
+6. On timeout: the reading is written as `unassigned`
+
+### Configuration
+
+```toml
+[ntfy]
+enabled = true
+port = 8080
+# base_url = "http://192.168.1.50:8080"  # auto-detected by default
+topic = "miscale-ambiguous"
+reply_topic = "miscale-ambiguous-reply"
+pending_timeout_hours = 24
+pending_file = "~/.cache/miscale/pending_confirmations.json"
+```
+
+The `base_url` is auto-detected as the machine's LAN IP. Set it explicitly only if auto-detection fails (multiple NICs, VPN, Docker networking).
+
+### Per-user weight notifications
+
+Optionally push every successfully-attributed reading to a per-user ntfy topic:
+
+```toml
+send_weight_readings = true
+weight_reading_topic_template = "miscale_{user}_weight_reading"
+```
+
+This sends a notification with weight, impedance, and derived metrics to each user's own topic — e.g. `miscale_Slartibartfast_weight_reading` only notifies Slartibartfast.
+
+## Running as a systemd Service
+
+The scanner runs as a systemd service for automatic startup and crash recovery:
+
+```bash
+sudo cp miscale.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now miscale.service
+```
+
+Key details:
+- Runs as your regular user (not root) — no special BLE permissions needed
+- Depends on `bluetooth.target` and `network-online.target`
+- Auto-restarts on failure after 10 seconds
+- Use `journalctl -u miscale -f` to view live logs (includes crash traces that don't appear in `miscale.log`)
+
 ## Project Roadmap
 
 | Stage | Status | Description |
 |-------|--------|-------------|
 | 1 | **Done** | BLE monitor, session tracking, logging |
-| 2 | **Done** | InfluxDB writer, Kalman filter user detection, state persistence |
-| 3 | Planned | systemd daemon service |
+| 2 | **Done** | InfluxDB writer, Kalman filter user detection, state persistence, ntfy notifications |
+| 3 | **Done** | systemd daemon service (auto-start, crash recovery, journal logging) |
 | 4 | Planned | GATT config commands (calibration, LED control, etc.) |
 
 ## External Resources

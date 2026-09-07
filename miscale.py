@@ -819,7 +819,20 @@ def compute_derived_metrics(user_info_cfg: dict, user_id: Optional[str],
 
 
 class InfluxDBWriter:
-    """Writes scale readings to InfluxDB 1.x."""
+    """Writes scale readings to InfluxDB 1.x.
+
+    Connection handling has two layers, since a one-shot connection
+    attempt at startup permanently disables writing for the whole run if
+    InfluxDB (e.g. a Docker container) isn't ready yet at boot:
+      1. Bounded retries at construction time — handles the common
+         "systemd started this before the InfluxDB container finished
+         initializing" race, without blocking forever if InfluxDB is
+         genuinely misconfigured or intentionally stopped.
+      2. ensure_connected(), called periodically from the main loop —
+         self-heals if InfluxDB comes up late (past the startup retry
+         budget) or bounces mid-run, without needing a restart. Rate
+         limited so a persistently-down server isn't hammered.
+    """
 
     def __init__(self, config: dict, logger: logging.Logger):
         self._enabled = config.get("enabled", False)
@@ -827,29 +840,77 @@ class InfluxDBWriter:
         self._port = config.get("port", 8086)
         self._database = config.get("database", "miscale")
         self._retention_policy = config.get("retention_policy", "autogen")
+        self._startup_retries = config.get("startup_retries", 6)
+        self._startup_retry_delay = config.get("startup_retry_delay_seconds", 5)
+        self._reconnect_interval = config.get("reconnect_interval_seconds", 60)
         self._logger = logger
         self._client = None
+        self._last_reconnect_attempt: Optional[datetime] = None
 
         if self._enabled:
-            try:
-                from influxdb import InfluxDBClient  # type: ignore
-                self._client = InfluxDBClient(
-                    host=self._host,
-                    port=self._port,
-                    database=self._database,
-                )
-                self._client.write_points([])
+            self._connect_with_retries()
+
+    def _connect_once(self) -> bool:
+        """Single connection attempt. Returns True on success."""
+        try:
+            from influxdb import InfluxDBClient  # type: ignore
+            client = InfluxDBClient(
+                host=self._host,
+                port=self._port,
+                database=self._database,
+                timeout=5,
+            )
+            client.write_points([])
+            self._client = client
+            self._logger.info(
+                "InfluxDB connected at %s:%d, database=%s",
+                self._host, self._port, self._database,
+            )
+            return True
+        except Exception as exc:
+            self._client = None
+            self._logger.debug("InfluxDB connection attempt failed: %s", exc)
+            return False
+
+    def _connect_with_retries(self) -> None:
+        """Bounded retry loop for startup — handles InfluxDB's Docker
+        container not being ready yet without blocking indefinitely."""
+        for attempt in range(1, self._startup_retries + 1):
+            if self._connect_once():
+                return
+            if attempt < self._startup_retries:
                 self._logger.info(
-                    "InfluxDB connected at %s:%d, database=%s",
-                    self._host, self._port, self._database,
+                    "InfluxDB not reachable yet at %s:%d (attempt %d/%d) — "
+                    "retrying in %ds...",
+                    self._host, self._port, attempt, self._startup_retries,
+                    self._startup_retry_delay,
                 )
-            except Exception as exc:
-                self._client = None
-                self._logger.warning(
-                    "Failed to connect to InfluxDB at %s:%d: %s — "
-                    "measurements will not be stored",
-                    self._host, self._port, exc,
-                )
+                time.sleep(self._startup_retry_delay)
+
+        self._logger.warning(
+            "Could not connect to InfluxDB at %s:%d after %d attempts (~%ds) — "
+            "proceeding without it. Will keep retrying every %ds in the "
+            "background; measurements are logged but not stored until it "
+            "connects.",
+            self._host, self._port, self._startup_retries,
+            self._startup_retries * self._startup_retry_delay,
+            self._reconnect_interval,
+        )
+        self._last_reconnect_attempt = datetime.now(timezone.utc)
+
+    def ensure_connected(self) -> None:
+        """Call periodically from the main loop. No-op if already
+        connected, disabled, or the reconnect interval hasn't elapsed
+        yet — rate limits retries against a persistently-down server."""
+        if not self._enabled or self._client is not None:
+            return
+        now = datetime.now(timezone.utc)
+        if (self._last_reconnect_attempt is not None
+                and (now - self._last_reconnect_attempt).total_seconds() < self._reconnect_interval):
+            return
+        self._last_reconnect_attempt = now
+        if self._connect_once():
+            self._logger.info("InfluxDB connection recovered")
 
     def get_last_weight(self, user: str) -> Optional[float]:
         """Get the most recent weight for a user from InfluxDB."""
@@ -1338,6 +1399,13 @@ async def run_scanner(config: dict, logger: logging.Logger) -> None:
         influx_cfg.get("port", 8086), influx_cfg.get("database", "miscale"),
     )
     logger.info(
+        "  [influxdb] startup_retries=%s startup_retry_delay_seconds=%s "
+        "reconnect_interval_seconds=%s",
+        influx_cfg.get("startup_retries", 6),
+        influx_cfg.get("startup_retry_delay_seconds", 5),
+        influx_cfg.get("reconnect_interval_seconds", 60),
+    )
+    logger.info(
         "  [ntfy] enabled=%s base_url=%s topic=%s reply_topic=%s "
         "pending_timeout_hours=%s send_weight_readings=%s weight_reading_topic_template=%s",
         ntfy_enabled, ntfy_base_url, ntfy_topic or "<unset>", ntfy_reply_topic or "<unset>",
@@ -1559,6 +1627,11 @@ async def run_scanner(config: dict, logger: logging.Logger) -> None:
                             sid, "unassigned", PendingConfirmations.entry_to_reading(entry),
                             entry.get("confidence", 0.0), entry.get("distances", {}),
                         )
+
+                # Retry the InfluxDB connection if it's not currently up
+                # (rate-limited internally — self-heals a slow-starting
+                # Docker container or a mid-run outage without a restart).
+                influx_writer.ensure_connected()
 
                 await asyncio.sleep(scan_interval)
         except asyncio.CancelledError:
