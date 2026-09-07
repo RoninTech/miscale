@@ -242,6 +242,27 @@ This sends a notification with weight, impedance, and derived metrics to each us
 
 The scanner runs as a systemd service for automatic startup and crash recovery:
 
+- Create a miscale.service file and replace <USERNAME> with yours and if your miscale project location is different, change that also:
+
+```ini
+[Unit]
+Description=Mi Scale BLE Monitor
+After=bluetooth.target network-online.target
+Wants=bluetooth.target network-online.target
+
+[Service]
+Type=simple
+User=<USERNAME>
+Group=<USERNAME>
+WorkingDirectory=/home/<USERNAME>/projects/miscale
+ExecStart=/usr/bin/python3 /home/<USERNAME>/projects/miscale/miscale.py --config /home/<USERNAME>/projects/miscale/miscale.toml
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+
 ```bash
 sudo cp miscale.service /etc/systemd/system/
 sudo systemctl daemon-reload
