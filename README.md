@@ -101,6 +101,28 @@ python3 miscale.py --config miscale.toml -d   # --dump-history: dump stored hist
 python3 miscale.py --config miscale.toml -e   # --erase-history: erase all stored history
 ```
 
+### `--dump-history` (`-d`) — how it works
+
+The scale stores up to ~20 readings internally. `--dump-history` reads them
+over BLE GATT using a multi-step protocol:
+
+1. Send `0x01 [device_id]` — asks the scale how many records it has
+2. Send `0x03` — closes the size query
+3. Send `0x02` — starts data transfer; the scale then sends each record as a
+   BLE notification (13 bytes each, same format as live advertisements)
+4. Send `0x03` — ends data transfer
+5. Send `0x04 [device_id]` — **advances the sync position**, telling the scale
+   those records have been read
+
+**Important: after a successful `-d`, the scale's history will be empty.**
+Step 5 advances the sync position past the records that were just read, so
+they are no longer retrievable via dump. This is by design — it prevents
+the same records from being dumped repeatedly across restarts.
+
+If you want to preserve the history, note the output or copy the log file
+before running `-d` again. To reset the history to zero, use `-e` (which
+requires typing `erase` to confirm).
+
 **Run as a systemd service** (recommended for actual daily use):
 
 ```bash

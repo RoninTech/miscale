@@ -252,7 +252,18 @@ async def dump_history(mac: str, logger: logging.Logger) -> None:
             size_response.extend(data)
             size_received.set()
         elif phase == "data":
-            records.append(bytes(data))
+            if len(data) == 13:
+                records.append(bytes(data))
+            else:
+                logger.debug(
+                    "Non-record notification in data phase (%d bytes): %s",
+                    len(data), bytes(data).hex(),
+                )
+        else:
+            logger.debug(
+                "Notification in phase='%s' (size_response_len=%d): %s",
+                phase, len(size_response), bytes(data).hex(),
+            )
 
     try:
         async with BleakClient(mac, timeout=15.0) as client:
@@ -286,7 +297,7 @@ async def dump_history(mac: str, logger: logging.Logger) -> None:
 
             # Step 2: Close size query
             await client.write_gatt_char(CHAR_BODY_COMP_HISTORY, bytes([0x03]), response=False)
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.5)  # give scale time to process before data transfer
 
             if record_count == 0:
                 logger.info("No history records on scale.")
@@ -294,8 +305,12 @@ async def dump_history(mac: str, logger: logging.Logger) -> None:
 
             # Step 3: Start data transfer
             phase = "data"
+            await asyncio.sleep(0.2)  # let notification handler settle
             data_received = asyncio.Event()
             expected_count = record_count
+
+            logger.info("Starting data transfer (%d record(s))...", expected_count)
+            await client.write_gatt_char(CHAR_BODY_COMP_HISTORY, bytes([0x02]), response=False)
 
             async def _wait_for_data():
                 # Wait until we have all records or timeout
@@ -315,14 +330,17 @@ async def dump_history(mac: str, logger: logging.Logger) -> None:
                 )
 
             # Step 4: End data transfer
-            await client.write_gatt_char(CHAR_BODY_COMP_HISTORY, bytes([0x03]), response=False)
-            await asyncio.sleep(0.2)
+            try:
+                await client.write_gatt_char(CHAR_BODY_COMP_HISTORY, bytes([0x03]), response=False)
+                await asyncio.sleep(0.2)
 
-            # Step 5: Advance sync position
-            await client.write_gatt_char(
-                CHAR_BODY_COMP_HISTORY, bytes([0x04]) + DEVICE_ID, response=False
-            )
-            await asyncio.sleep(0.2)
+                # Step 5: Advance sync position
+                await client.write_gatt_char(
+                    CHAR_BODY_COMP_HISTORY, bytes([0x04]) + DEVICE_ID, response=False
+                )
+                await asyncio.sleep(0.2)
+            except BleakError as exc:
+                logger.warning("BLE write failed during cleanup: %s (connection may have dropped)", exc)
 
             # Decode and display records
             logger.info("=" * 60)
@@ -417,6 +435,7 @@ async def get_scale_info(mac: str, logger: logging.Logger, config: dict) -> None
     # Query InfluxDB for last weight unit if enabled
     influx_cfg = config.get("influxdb", {})
     influx_writer = InfluxDBWriter(influx_cfg, logger)
+    await influx_writer.initialize()
     last_unit = influx_writer.get_last_unit()
     if last_unit is not None:
         logger.info("Weight unit (from last reading): %s", last_unit)
@@ -1102,8 +1121,34 @@ class InfluxDBWriter:
         self._client = None
         self._last_reconnect_attempt: Optional[datetime] = None
 
-        if self._enabled:
-            self._connect_with_retries()
+    async def initialize(self) -> None:
+        """Non-blocking startup connection with retries. Call this from
+        an async context before using the writer — handles InfluxDB's
+        Docker container not being ready yet without blocking the event loop."""
+        if not self._enabled:
+            return
+        for attempt in range(1, self._startup_retries + 1):
+            if self._connect_once():
+                return
+            if attempt < self._startup_retries:
+                self._logger.info(
+                    "InfluxDB not reachable yet at %s:%d (attempt %d/%d) — "
+                    "retrying in %ds...",
+                    self._host, self._port, attempt, self._startup_retries,
+                    self._startup_retry_delay,
+                )
+                await asyncio.sleep(self._startup_retry_delay)
+
+        self._logger.warning(
+            "Could not connect to InfluxDB at %s:%d after %d attempts (~%ds) — "
+            "proceeding without it. Will keep retrying every %ds in the "
+            "background; measurements are logged but not stored until it "
+            "connects.",
+            self._host, self._port, self._startup_retries,
+            self._startup_retries * self._startup_retry_delay,
+            self._reconnect_interval,
+        )
+        self._last_reconnect_attempt = datetime.now(timezone.utc)
 
     def _connect_once(self) -> bool:
         """Single connection attempt. Returns True on success."""
@@ -1126,32 +1171,6 @@ class InfluxDBWriter:
             self._client = None
             self._logger.debug("InfluxDB connection attempt failed: %s", exc)
             return False
-
-    def _connect_with_retries(self) -> None:
-        """Bounded retry loop for startup — handles InfluxDB's Docker
-        container not being ready yet without blocking indefinitely."""
-        for attempt in range(1, self._startup_retries + 1):
-            if self._connect_once():
-                return
-            if attempt < self._startup_retries:
-                self._logger.info(
-                    "InfluxDB not reachable yet at %s:%d (attempt %d/%d) — "
-                    "retrying in %ds...",
-                    self._host, self._port, attempt, self._startup_retries,
-                    self._startup_retry_delay,
-                )
-                time.sleep(self._startup_retry_delay)
-
-        self._logger.warning(
-            "Could not connect to InfluxDB at %s:%d after %d attempts (~%ds) — "
-            "proceeding without it. Will keep retrying every %ds in the "
-            "background; measurements are logged but not stored until it "
-            "connects.",
-            self._host, self._port, self._startup_retries,
-            self._startup_retries * self._startup_retry_delay,
-            self._reconnect_interval,
-        )
-        self._last_reconnect_attempt = datetime.now(timezone.utc)
 
     def ensure_connected(self) -> None:
         """Call periodically from the main loop. No-op if already
@@ -1552,6 +1571,7 @@ async def run_scanner(config: dict, logger: logging.Logger) -> None:
     # InfluxDB writer (Stage 2)
     influx_cfg = config.get("influxdb", {})
     influx_writer = InfluxDBWriter(influx_cfg, logger)
+    await influx_writer.initialize()
 
     # Ambiguous-reading confirmation via ntfy (optional)
     ntfy_cfg = config.get("ntfy", {})
