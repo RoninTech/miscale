@@ -175,34 +175,45 @@ async def erase_history(mac: str, logger: logging.Logger) -> None:
 
     Subscribes to notifications on the Huami Configuration characteristic,
     sends 0x06 0x12 0x00 0x00, and waits for the response
-    0x16 0x06 0x12 0x00 0x01 (success) within 5 seconds.
+    0x10 0x06 0x12 0x00 0x01 (success, firmware V1.0.0.12) or
+    0x16 0x06 0x12 0x00 0x01 (older firmwares) within 60 seconds.
     This operation is irreversible.
     """
     payload = bytes([0x06, 0x12, 0x00, 0x00])
-    expected_response = bytes([0x16, 0x06, 0x12, 0x00, 0x01])
+    expected_responses = [bytes([0x16, 0x06, 0x12, 0x00, 0x01]), bytes([0x10, 0x06, 0x12, 0x00, 0x01])]
     mac_upper = mac.upper()
     logger.info("Connecting to scale %s to erase history...", mac_upper)
 
     response_found = asyncio.Event()
     response_data: list = []
+    notification_count = 0
 
     def _notification_handler(_char, data: bytearray) -> None:
-        if bytes(data) == expected_response:
+        nonlocal notification_count
+        notification_count += 1
+        logger.info(
+            "Erase notification #%d: %s",
+            notification_count,
+            bytes(data).hex(),
+        )
+        if bytes(data) in expected_responses:
             response_data.extend(data)
             response_found.set()
 
     try:
-        async with BleakClient(mac, timeout=10.0) as client:
+        async with BleakClient(mac, timeout=60.0) as client:
             await client.start_notify(CHAR_CONFIG, _notification_handler)
             await client.write_gatt_char(CHAR_CONFIG, payload, response=False)
-            logger.info("History erase command sent to scale %s", mac_upper)
+            logger.info("History erase command sent to scale %s (this may take 20-30s)...", mac_upper)
 
             try:
-                await asyncio.wait_for(response_found.wait(), timeout=5.0)
+                await asyncio.wait_for(response_found.wait(), timeout=60.0)
             except asyncio.TimeoutError:
                 logger.error(
-                    "Timed out waiting for erase-history response from scale %s",
+                    "Timed out waiting for erase-history response from scale %s "
+                    "(scale may still be processing). Total notifications received: %d",
                     mac_upper,
+                    notification_count,
                 )
                 raise BleakError("No response from scale")
 
