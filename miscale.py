@@ -1424,14 +1424,20 @@ def send_ambiguous_notification(base_url: str, topic: str, reply_topic: str,
         with urllib.request.urlopen(req, timeout=10) as resp:
             status = resp.status
             body = resp.read().decode("utf-8", errors="replace")
-        logger.info(
-            "[%s] Sent ntfy confirmation request to topic '%s' (HTTP %d)",
-            session_id, topic, status,
-        )
-        logger.debug(
-                "[%s] ntfy %s confirmation contents: %s",
-                session_id, topic, body.strip() or "<empty>"
-        )
+        if status not in (200, 201):
+            logger.error(
+                "[%s] Notification server rejected request with status code: %d",
+                session_id, status,
+            )
+        else:
+            logger.info(
+                "[%s] Sent ntfy confirmation request to topic '%s' (HTTP %d)",
+                session_id, topic, status,
+            )
+            logger.debug(
+                    "[%s] ntfy %s confirmation contents: %s",
+                    session_id, topic, body.strip() or "<empty>"
+            )
     except (urllib.error.URLError, OSError) as exc:
         logger.warning(
             "[%s] Failed to send ntfy notification to topic '%s': %s", session_id, topic, exc
@@ -1479,14 +1485,20 @@ def send_weight_reading_notification(base_url: str, topic_template: str, user_id
         with urllib.request.urlopen(req, timeout=10) as resp:
             status = resp.status
             body = resp.read().decode("utf-8", errors="replace")
-        logger.info(
-            "[%s] Sent weight-reading notification to topic '%s' (HTTP %d)",
-            user_id, topic, status,
-        )
-        logger.debug(
-                "[%s] Sent %s response : %s",
-                user_id, topic, body.strip() or "<empty>",
-        )
+        if status not in (200, 201):
+            logger.error(
+                "[%s] Notification server rejected request with status code: %d",
+                user_id, status,
+            )
+        else:
+            logger.info(
+                "[%s] Sent weight-reading notification to topic '%s' (HTTP %d)",
+                user_id, topic, status,
+            )
+            logger.debug(
+                    "[%s] Sent %s response : %s",
+                    user_id, topic, body.strip() or "<empty>",
+            )
     except (urllib.error.URLError, OSError) as exc:
         logger.warning(
             "[%s] Failed to send weight-reading notification to topic '%s': %s",
