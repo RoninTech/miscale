@@ -1532,15 +1532,6 @@ def _ntfy_listener_thread(base_url: str, reply_topic: str,
 # ---------------------------------------------------------------------------
 
 
-def _detection_callback(device, advertisement_data) -> None:
-    """Internal callback passed to BleakScanner."""
-    _pending_readings.append((device, advertisement_data))
-
-
-# Shared list for callback → main loop communication
-_pending_readings: list[tuple] = []
-
-
 async def run_scanner(config: dict, logger: logging.Logger) -> None:
     """Main scanning loop — runs until interrupted."""
     scan_cfg = config["scan"]
@@ -1681,6 +1672,16 @@ async def run_scanner(config: dict, logger: logging.Logger) -> None:
                      influx_cfg.get("port", 8086),
                      influx_cfg.get("database", "miscale"))
 
+    # Thread-safe queue for BLE callback → main loop communication
+    pending_queue: asyncio.Queue[tuple] = asyncio.Queue()
+
+    def _detection_callback(device, advertisement_data) -> None:
+        """Internal callback passed to BleakScanner — pushes into the queue."""
+        try:
+            pending_queue.put_nowait((device, advertisement_data))
+        except asyncio.QueueFull:
+            pass  # dropped advertisement if queue is full
+
     # Use the modern bluez kwarg for adapter selection
     bluez_args = {"adapter": hci_device} if hci_device else None
 
@@ -1691,9 +1692,13 @@ async def run_scanner(config: dict, logger: logging.Logger) -> None:
         logger.info("BLE scanner started, waiting for advertisements…")
         try:
             while True:
-                # Process any pending advertisements collected by the callback
-                pending = _pending_readings[:]
-                _pending_readings.clear()
+                # Drain all pending advertisements collected by the callback
+                pending = []
+                while True:
+                    try:
+                        pending.append(pending_queue.get_nowait())
+                    except asyncio.QueueEmpty:
+                        break
 
                 if pending:
                     logger.debug("Received %d advertisement(s)", len(pending))
