@@ -13,7 +13,7 @@
 | `impedance_ohm` | field, integer | Raw impedance reading from the advertisement. |
 | `unit_name` | field, string | `"kg"`, `"lbs"`, or `"catty"` — the scale's unit setting at the time of that reading. Queried via `last("unit_name")` to answer `--get-info`'s "what unit is the scale in" question. No live-BLE-scan fallback — if InfluxDB is disabled, unreachable, or has no data yet, `--get-info` simply omits the unit line (accepted tradeoff, documented separately). |
 | `confidence` | field, float | 0–1 classifier confidence for the `user` assignment. Mathematically derivable from the two `dist_*` fields (it's the normalized gap between them) but stored directly for query convenience. |
-| `session_id` | field, string | Links back to the BLE session-tracking log line for that reading (e.g. `0C9541886000E:003`), for debugging a specific stored value against the application log. Format is `<MAC>:<counter>` where the counter is randomly seeded (100–999) on each process start to avoid collisions across restarts. |
+| `session_id` | field, string | Links back to the BLE session-tracking log line for that reading (e.g. `0C9541886000E:003`), for debugging a specific stored value against the application log. Format is `<MAC>:<counter>` where the counter is randomly seeded (0–999) on each process start to reduce collisions across restarts. |
 | `dist_user1` | field, float | Penalized Mahalanobis distance from this reading to user1's Kalman filter state at classification time — the raw score the classifier used to decide the assignment. |
 | `dist_user2` | field, float | Same, for user2. |
 

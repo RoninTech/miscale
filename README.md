@@ -172,7 +172,7 @@ Measurement `weight`, one point per finalized reading:
   self-hosted ntfy server is exposed on — set `ntfy.port` accordingly. If
   auto-detection ever picks the wrong interface (multiple NICs, an active
   VPN), set `ntfy.base_url` explicitly to override it.
-- Session IDs (`<mac>:<counter>`) are now randomly seeded (100–999) on each
+- Session IDs (`<mac>:<counter>`) are now randomly seeded (0–999) on each
   process start to reduce collision probability, but they can still
   theoretically collide across restarts. Harmless for InfluxDB storage
   (it's a field, not part of a point's identity), but worth knowing if
