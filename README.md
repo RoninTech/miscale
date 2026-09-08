@@ -97,6 +97,8 @@ independent of whether the scanner is otherwise running):
 python3 miscale.py --config miscale.toml -i   # --get-info: read device info from the scale
 python3 miscale.py --config miscale.toml -t   # --set-time: sync the scale's internal clock
 python3 miscale.py --config miscale.toml -u kg   # --set-unit: kg | lbs | catty | jin
+python3 miscale.py --config miscale.toml -d   # --dump-history: dump stored history records
+python3 miscale.py --config miscale.toml -e   # --erase-history: erase all stored history
 ```
 
 **Run as a systemd service** (recommended for actual daily use):

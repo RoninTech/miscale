@@ -52,6 +52,9 @@ CHAR_SERIAL = "00002a25-0000-1000-8000-00805f9b34fb"
 CHAR_HW_REV = "00002a27-0000-1000-8000-00805f9b34fb"
 CHAR_FW_REV = "00002a28-0000-1000-8000-00805f9b34fb"
 
+# Body Composition service (0000181b) characteristics
+CHAR_BODY_COMP_HISTORY = "00002a2f-0000-1000-8000-00805f9b34fb"
+
 # Huami Configuration service (00001530) characteristics
 CHAR_BATTERY = "00001543-0000-3512-2118-0009af100700"
 CHAR_CONFIG = "00001542-0000-3512-2118-0009af100700"
@@ -210,6 +213,141 @@ async def erase_history(mac: str, logger: logging.Logger) -> None:
             )
     except Exception as exc:
         logger.warning("Failed to erase history: %s", exc)
+
+
+async def dump_history(mac: str, logger: logging.Logger) -> None:
+    """Connect to the scale and dump its internal history via GATT.
+
+    Protocol (per reverse-engineered spec):
+      1. Send 0x01 [device_id] to query record count
+      2. Send 0x03 to close the size query
+      3. Subscribe to notifications, send 0x02 to start data transfer
+      4. Read notification records (same format as BLE advertisements)
+      5. Send 0x03 to end, then 0x04 [device_id] to advance sync position
+    """
+    from datetime import datetime, timezone
+
+    DEVICE_ID = bytes([0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE])
+    mac_upper = mac.upper()
+    logger.info("Connecting to scale %s to dump history...", mac_upper)
+
+    records: list = []
+
+    def _notification_handler(_char, data: bytearray) -> None:
+        records.append(bytes(data))
+
+    try:
+        async with BleakClient(mac, timeout=15.0) as client:
+            # Step 1: Query data size
+            size_cmd = bytes([0x01]) + DEVICE_ID
+            await client.write_gatt_char(CHAR_BODY_COMP_HISTORY, size_cmd, response=True)
+            logger.info("Querying history size...")
+
+            try:
+                size_resp = await asyncio.wait_for(
+                    client.read_gatt_char(CHAR_BODY_COMP_HISTORY), timeout=3.0
+                )
+            except (asyncio.TimeoutError, Exception) as exc:
+                logger.warning(
+                    "No response to size query (%s), sending 0x03 and aborting", exc
+                )
+                await client.write_gatt_char(CHAR_BODY_COMP_HISTORY, bytes([0x03]), response=False)
+                return
+
+            if len(size_resp) < 3 or size_resp[0] != 1:
+                logger.warning(
+                    "Invalid size response (%s), sending 0x03 and aborting",
+                    size_resp.hex() if size_resp else "empty",
+                )
+                await client.write_gatt_char(CHAR_BODY_COMP_HISTORY, bytes([0x03]), response=False)
+                return
+
+            record_count = int.from_bytes(size_resp[1:3], "little")
+            logger.info("Scale reports %d history record(s)", record_count)
+
+            # Step 2: Close size query
+            await client.write_gatt_char(CHAR_BODY_COMP_HISTORY, bytes([0x03]), response=False)
+
+            if record_count == 0:
+                logger.info("No history records on scale.")
+                return
+
+            # Step 3: Subscribe to notifications and start data transfer
+            await client.start_notify(CHAR_BODY_COMP_HISTORY, _notification_handler)
+            await asyncio.sleep(0.2)  # let subscription settle
+            await client.write_gatt_char(CHAR_BODY_COMP_HISTORY, bytes([0x02]), response=False)
+            logger.info("Receiving %d record(s)...", record_count)
+
+            try:
+                await asyncio.wait_for(
+                    asyncio.Event().wait(),
+                    timeout=30.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("Timeout receiving history records (got %d)", len(records))
+
+            # Step 4: End data transfer
+            await client.write_gatt_char(CHAR_BODY_COMP_HISTORY, bytes([0x03]), response=False)
+            await asyncio.sleep(0.2)
+
+            # Step 5: Advance sync position
+            await client.write_gatt_char(
+                CHAR_BODY_COMP_HISTORY, bytes([0x04]) + DEVICE_ID, response=False
+            )
+            await asyncio.sleep(0.2)
+
+            # Decode and display records
+            logger.info("=" * 60)
+            logger.info("HISTORY RECORDS (%d total)", len(records))
+            logger.info("=" * 60)
+
+            for i, raw in enumerate(records, 1):
+                try:
+                    unit_code = raw[0]
+                    flags = raw[1]
+                    year = int.from_bytes(raw[2:4], "little")
+                    month = raw[4]
+                    day = raw[5]
+                    hour = raw[6]
+                    minute = raw[7]
+                    second = raw[8]
+                    impedance = int.from_bytes(raw[9:11], "little")
+                    weight_raw = int.from_bytes(raw[11:13], "little")
+
+                    if unit_code == 0x02:
+                        weight_kg = weight_raw / 200.0
+                        unit_name = "kg"
+                    elif unit_code == 0x03:
+                        weight_kg = weight_raw / 100.0
+                        unit_name = "lbs"
+                    else:
+                        weight_kg = weight_raw
+                        unit_name = f"unknown(0x{unit_code:02x})"
+
+                    has_imp = bool(flags & 0x02)
+                    is_stabilized = bool(flags & 0x20)
+                    load_removed = bool(flags & 0x80)
+
+                    ts = datetime(year, month, day, hour, minute, second, tzinfo=timezone.utc)
+
+                    logger.info(
+                        "  #%d: %s | %s %s | imp=%s%s Ω | stable=%s load=%s",
+                        i,
+                        ts.strftime("%Y-%m-%d %H:%M:%S"),
+                        weight_kg,
+                        unit_name,
+                        impedance if has_imp else "N/A",
+                        "" if has_imp else " (invalid)",
+                        is_stabilized,
+                        load_removed,
+                    )
+                except Exception as exc:
+                    logger.warning("  #%d: failed to decode: %s (%s)", i, raw.hex(), exc)
+
+            logger.info("=" * 60)
+
+    except Exception as exc:
+        logger.warning("Failed to dump history: %s", exc)
 
 
 async def set_scale_unit(mac: str, unit: str, logger: logging.Logger) -> None:
@@ -1768,6 +1906,11 @@ def main():
         action="store_true",
         help="Erase the scale's internal history and exit (irreversible)",
     )
+    parser.add_argument(
+        "-d", "--dump-history",
+        action="store_true",
+        help="Dump the scale's internal history and exit",
+    )
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -1827,6 +1970,16 @@ def main():
             logger.info("Erase history cancelled.")
             return
         asyncio.run(erase_history(mac, logger))
+        return
+
+    # One-shot dump history
+    if args.dump_history:
+        scan_cfg = config.get("scan", {})
+        mac = scan_cfg.get("scale_mac", "")
+        if not mac:
+            logger.error("No scale MAC configured in [scan] section")
+            sys.exit(1)
+        asyncio.run(dump_history(mac, logger))
         return
 
     try:

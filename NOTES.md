@@ -90,7 +90,7 @@ Primary interaction: Write Without Response / Write with Notify subscription.
 | Current Time | `00002a2b` | Read/Write | Set scale clock (9 bytes) |
 | Body Comp Feature | `00002a9b` | Read | Feature flags (`01230000`) |
 | Body Comp Measurement | `00002a9c` | Indicate | Mirrors advertisement payload |
-| Body Comp History | `00002a2f` | Write/Notify | History sync (see mi_ble_protocol.md) |
+| Body Comp History | `00002a2f` | Write/Notify | History sync (see MISCALE_BLE_PROTOCOL.md) |
 
 ## BLE Advertisement Format (V2 scale, service UUID 0000181b)
 
@@ -219,6 +219,7 @@ All measurements are stored and processed in **kg** regardless of the scale's di
   - `flags 0x01` = active, `0x02` = stopped
   - `time` = uint16 LE, 10ms units
 - Erase history command (`0x06 0x12 0x00 0x00`) — irreversible, requires interactive confirmation
+- Dump history command (`--dump-history`) — reads records from Body Comp History characteristic (`00002a2f`)
 - Partial measures enable/disable (`0x06 0x10 0x00 [!enable]`)
 
 ## Dependencies (stage 1)
@@ -289,3 +290,4 @@ Clean raw hex capture:
 - [x] Stage 4: Implement display unit configuration (write to `00001542`)
 - [ ] Stage 4: Implement balance test / one-foot measure mode
 - [x] Stage 4: Add erase history command (with confirmation)
+- [x] Stage 4: Add dump history command (reads from `00002a2f`)
