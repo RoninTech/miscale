@@ -74,7 +74,7 @@ Primary interaction: Write Without Response / Write with Notify subscription.
 |---|---|---|
 | Display Unit | `0x06 0x04 0x00 [unit]` | `unit`: `0x00` SI (kg), `0x01` Imperial (lbs), `0x02` Catty (jin) |
 | Partial Measures | `0x06 0x10 0x00 [!enable]` | `0x16 0x06 0x10 0x00 0x01` — Enable/disable unstable measurements |
-| Erase History | `0x06 0x12 0x00 0x00` | `0x16 0x06 0x12 0x00 0x01` — Irreversible |
+| Erase History | `0x06 0x12 0x00 0x00` *(subscribe notify)* | `0x16 0x06 0x12 0x00 0x01` — Irreversible, 5s timeout |
 | LED Display Control | `0x04 0x02` (On)<br>`0x04 0x03` (Off) | Directly toggles LED matrix |
 | Tare / Zero Calibration | `0x06 0x05 0x00 0x00` | Scale must be idle on flat surface, zero weight. LED shows `- - - -` |
 | Self-Test Diagnostics | `0x04 0x01` (Start)<br>`0x04 0x04` (Exit) | Lights all LED segments, runs BIA circuit tests |
@@ -218,7 +218,7 @@ All measurements are stored and processed in **kg** regardless of the scale's di
   - Streams real-time duration data via notify subscription
   - `flags 0x01` = active, `0x02` = stopped
   - `time` = uint16 LE, 10ms units
-- Erase history command (`0x06 0x12 0x00 0x00`) — irreversible
+- Erase history command (`0x06 0x12 0x00 0x00`) — irreversible, requires interactive confirmation
 - Partial measures enable/disable (`0x06 0x10 0x00 [!enable]`)
 
 ## Dependencies (stage 1)
@@ -288,4 +288,4 @@ Clean raw hex capture:
 - [ ] Stage 4: Add LED display on/off control
 - [x] Stage 4: Implement display unit configuration (write to `00001542`)
 - [ ] Stage 4: Implement balance test / one-foot measure mode
-- [ ] Stage 4: Add erase history command (with confirmation)
+- [x] Stage 4: Add erase history command (with confirmation)

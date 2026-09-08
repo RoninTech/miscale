@@ -166,6 +166,51 @@ async def set_scale_time(mac: str, logger: logging.Logger) -> None:
         logger.warning("Failed to set scale clock: %s", exc)
 
 
+async def erase_history(mac: str, logger: logging.Logger) -> None:
+    """Connect to the scale and erase its internal history.
+
+    Subscribes to notifications on the Huami Configuration characteristic,
+    sends 0x06 0x12 0x00 0x00, and waits for the response
+    0x16 0x06 0x12 0x00 0x01 (success) within 5 seconds.
+    This operation is irreversible.
+    """
+    payload = bytes([0x06, 0x12, 0x00, 0x00])
+    expected_response = bytes([0x16, 0x06, 0x12, 0x00, 0x01])
+    mac_upper = mac.upper()
+    logger.info("Connecting to scale %s to erase history...", mac_upper)
+
+    response_found = asyncio.Event()
+    response_data: list = []
+
+    def _notification_handler(_char, data: bytearray) -> None:
+        if bytes(data) == expected_response:
+            response_data.extend(data)
+            response_found.set()
+
+    try:
+        async with BleakClient(mac, timeout=10.0) as client:
+            await client.start_notify(CHAR_CONFIG, _notification_handler)
+            await client.write_gatt_char(CHAR_CONFIG, payload, response=False)
+            logger.info("History erase command sent to scale %s", mac_upper)
+
+            try:
+                await asyncio.wait_for(response_found.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.error(
+                    "Timed out waiting for erase-history response from scale %s",
+                    mac_upper,
+                )
+                raise BleakError("No response from scale")
+
+            logger.info(
+                "History erase confirmed on scale %s (response: %s)",
+                mac_upper,
+                bytes(response_data).hex(),
+            )
+    except Exception as exc:
+        logger.warning("Failed to erase history: %s", exc)
+
+
 async def set_scale_unit(mac: str, unit: str, logger: logging.Logger) -> None:
     """Connect to the scale and set its display unit (kg / lbs / catty).
 
@@ -1717,6 +1762,11 @@ def main():
         choices=["kg", "lbs", "catty", "jin"],
         help="Set the scale display unit and exit (kg, lbs, catty/jin)",
     )
+    parser.add_argument(
+        "-e", "--erase-history",
+        action="store_true",
+        help="Erase the scale's internal history and exit (irreversible)",
+    )
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -1759,6 +1809,23 @@ def main():
             logger.error("No scale MAC configured in [scan] section")
             sys.exit(1)
         asyncio.run(set_scale_unit(mac, args.set_unit, logger))
+        return
+
+    # One-shot erase history (with confirmation)
+    if args.erase_history:
+        scan_cfg = config.get("scan", {})
+        mac = scan_cfg.get("scale_mac", "")
+        if not mac:
+            logger.error("No scale MAC configured in [scan] section")
+            sys.exit(1)
+        confirm = input(
+            "WARNING: This will irreversibly erase all stored history from "
+            "the scale. Type 'erase' to confirm: "
+        )
+        if confirm.strip() != "erase":
+            logger.info("Erase history cancelled.")
+            return
+        asyncio.run(erase_history(mac, logger))
         return
 
     try:
