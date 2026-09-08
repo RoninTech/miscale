@@ -53,7 +53,7 @@ CHAR_HW_REV = "00002a27-0000-1000-8000-00805f9b34fb"
 CHAR_FW_REV = "00002a28-0000-1000-8000-00805f9b34fb"
 
 # Body Composition service (0000181b) characteristics
-CHAR_BODY_COMP_HISTORY = "00002a2f-0000-1000-8000-00805f9b34fb"
+CHAR_BODY_COMP_HISTORY = "00002a2f-0000-3512-2118-0009af100700"
 
 # Huami Configuration service (00001530) characteristics
 CHAR_BATTERY = "00001543-0000-3512-2118-0009af100700"
@@ -227,37 +227,45 @@ async def dump_history(mac: str, logger: logging.Logger) -> None:
     """
     from datetime import datetime, timezone
 
-    DEVICE_ID = bytes([0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE])
+    DEVICE_ID = bytes([0xDE, 0xAD, 0xBE, 0xEF])
     mac_upper = mac.upper()
     logger.info("Connecting to scale %s to dump history...", mac_upper)
 
     records: list = []
+    size_response: list = []
+    size_received = asyncio.Event()
+    phase = "size"  # "size" or "data"
 
     def _notification_handler(_char, data: bytearray) -> None:
-        records.append(bytes(data))
+        if phase == "size" and len(size_response) == 0:
+            size_response.extend(data)
+            size_received.set()
+        elif phase == "data":
+            records.append(bytes(data))
 
     try:
         async with BleakClient(mac, timeout=15.0) as client:
+            # Subscribe to notifications BEFORE any writes
+            await client.start_notify(CHAR_BODY_COMP_HISTORY, _notification_handler)
+            await asyncio.sleep(0.2)
+
             # Step 1: Query data size
             size_cmd = bytes([0x01]) + DEVICE_ID
-            await client.write_gatt_char(CHAR_BODY_COMP_HISTORY, size_cmd, response=True)
+            await client.write_gatt_char(CHAR_BODY_COMP_HISTORY, size_cmd, response=False)
             logger.info("Querying history size...")
 
             try:
-                size_resp = await asyncio.wait_for(
-                    client.read_gatt_char(CHAR_BODY_COMP_HISTORY), timeout=3.0
-                )
-            except (asyncio.TimeoutError, Exception) as exc:
-                logger.warning(
-                    "No response to size query (%s), sending 0x03 and aborting", exc
-                )
+                await asyncio.wait_for(size_received.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning("No response to size query, sending 0x03 and aborting")
                 await client.write_gatt_char(CHAR_BODY_COMP_HISTORY, bytes([0x03]), response=False)
                 return
 
+            size_resp = bytes(size_response)
             if len(size_resp) < 3 or size_resp[0] != 1:
                 logger.warning(
                     "Invalid size response (%s), sending 0x03 and aborting",
-                    size_resp.hex() if size_resp else "empty",
+                    size_resp.hex(),
                 )
                 await client.write_gatt_char(CHAR_BODY_COMP_HISTORY, bytes([0x03]), response=False)
                 return
@@ -267,24 +275,33 @@ async def dump_history(mac: str, logger: logging.Logger) -> None:
 
             # Step 2: Close size query
             await client.write_gatt_char(CHAR_BODY_COMP_HISTORY, bytes([0x03]), response=False)
+            await asyncio.sleep(0.1)
 
             if record_count == 0:
                 logger.info("No history records on scale.")
                 return
 
-            # Step 3: Subscribe to notifications and start data transfer
-            await client.start_notify(CHAR_BODY_COMP_HISTORY, _notification_handler)
-            await asyncio.sleep(0.2)  # let subscription settle
-            await client.write_gatt_char(CHAR_BODY_COMP_HISTORY, bytes([0x02]), response=False)
-            logger.info("Receiving %d record(s)...", record_count)
+            # Step 3: Start data transfer
+            phase = "data"
+            data_received = asyncio.Event()
+            expected_count = record_count
+
+            async def _wait_for_data():
+                # Wait until we have all records or timeout
+                while len(records) < expected_count:
+                    await asyncio.sleep(0.5)
+                    if len(records) > 0 and len(records) % 20 == 0:
+                        logger.info("Received %d/%d records", len(records), expected_count)
 
             try:
                 await asyncio.wait_for(
-                    asyncio.Event().wait(),
-                    timeout=30.0,
+                    _wait_for_data(), timeout=120.0
                 )
             except asyncio.TimeoutError:
-                logger.warning("Timeout receiving history records (got %d)", len(records))
+                logger.warning(
+                    "Timeout receiving history records (got %d/%d)",
+                    len(records), expected_count,
+                )
 
             # Step 4: End data transfer
             await client.write_gatt_char(CHAR_BODY_COMP_HISTORY, bytes([0x03]), response=False)
