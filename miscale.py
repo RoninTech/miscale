@@ -17,6 +17,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import random
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -477,7 +478,7 @@ class SessionTracker:
 
     def _next_session_id(self, mac: str) -> str:
         if mac not in self._session_counters:
-            self._session_counters[mac] = 0
+            self._session_counters[mac] = random.randint(100, 999)
         self._session_counters[mac] += 1
         return f"{mac.replace(':', '')}:{self._session_counters[mac]:03d}"
 
