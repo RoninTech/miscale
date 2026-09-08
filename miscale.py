@@ -837,20 +837,22 @@ class UserDetector:
             )
         self.logger.info("Loaded persisted user state from %s", self.state_file)
 
-    def _save_persisted_state(self) -> None:
-        self.state_file.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            user_id: {
-                "x": state.x.tolist(),
-                "P": state.P.tolist(),
-                "last_seen": state.last_seen.isoformat() if state.last_seen else None,
+    async def _save_persisted_state(self) -> None:
+        def _write() -> None:
+            self.state_file.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                user_id: {
+                    "x": state.x.tolist(),
+                    "P": state.P.tolist(),
+                    "last_seen": state.last_seen.isoformat() if state.last_seen else None,
+                }
+                for user_id, state in self.states.items()
             }
-            for user_id, state in self.states.items()
-        }
-        tmp_path = self.state_file.with_suffix(".tmp")
-        with open(tmp_path, "w") as f:
-            json.dump(payload, f, indent=2)
-        tmp_path.replace(self.state_file)
+            tmp_path = self.state_file.with_suffix(".tmp")
+            with open(tmp_path, "w") as f:
+                json.dump(payload, f, indent=2)
+            tmp_path.replace(self.state_file)
+        await asyncio.to_thread(_write)
 
     # -- classification --------------------------------------------------
 
@@ -882,8 +884,8 @@ class UserDetector:
         penalty = 1.0 + (overshoot_ratio - 1.0) * 2.0
         return min(penalty, self.max_plausibility_penalty)
 
-    def classify(self, weight_kg: float, impedance_ohm: float,
-                 timestamp: datetime) -> DetectionResult:
+    async def classify(self, weight_kg: float, impedance_ohm: float,
+                       timestamp: datetime) -> DetectionResult:
         """Score a finalized reading against every user and either assign
         it or flag it ambiguous. Updates the winning user's filter."""
         z = np.array([weight_kg, float(impedance_ohm)])
@@ -902,7 +904,7 @@ class UserDetector:
 
         if len(ranked) == 1:
             best_user, best_score = ranked[0]
-            self._commit(best_user, z, timestamp)
+            await self._commit(best_user, z, timestamp)
             return DetectionResult(best_user, 1.0, scores, "only_user_configured",
                                     gap=0.0, threshold=self.confidence_gap_threshold)
 
@@ -919,11 +921,11 @@ class UserDetector:
             )
 
         confidence = min(gap / (self.confidence_gap_threshold * 3), 1.0)
-        self._commit(best_user, z, timestamp)
+        await self._commit(best_user, z, timestamp)
         return DetectionResult(best_user, confidence, scores, "clear_winner",
                                 gap=gap, threshold=self.confidence_gap_threshold)
 
-    def _commit(self, user_id: str, z: np.ndarray, timestamp: datetime) -> None:
+    async def _commit(self, user_id: str, z: np.ndarray, timestamp: datetime) -> None:
         """Kalman-update the winning user's filter and persist state."""
         state = self.states[user_id]
         R = np.diag([self.meas_var_weight, self.meas_var_impedance])
@@ -933,10 +935,10 @@ class UserDetector:
         state.x = state.x + K @ y
         state.P = (np.eye(2) - K) @ state.P
         state.last_seen = timestamp
-        self._save_persisted_state()
+        await self._save_persisted_state()
 
-    def manual_commit(self, user_id: str, weight_kg: float,
-                       impedance_ohm: Optional[float], timestamp: datetime) -> bool:
+    async def manual_commit(self, user_id: str, weight_kg: float,
+                            impedance_ohm: Optional[float], timestamp: datetime) -> bool:
         """Commit a human-confirmed assignment exactly like a clear
         classifier win — updates that user's Kalman filter and persists
         state. Returns False if user_id isn't recognized."""
@@ -945,7 +947,7 @@ class UserDetector:
             return False
         impedance = impedance_ohm if impedance_ohm else self.states[user_id].x[1]
         z = np.array([weight_kg, float(impedance)])
-        self._commit(user_id, z, timestamp)
+        await self._commit(user_id, z, timestamp)
         return True
 
     def name_for(self, user_id: Optional[str]) -> str:
@@ -1321,14 +1323,16 @@ class PendingConfirmations:
             )
             return {}
 
-    def _save(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self.path.with_suffix(".tmp")
-        with open(tmp_path, "w") as f:
-            json.dump(self._data, f, indent=2)
-        tmp_path.replace(self.path)
+    async def _save(self) -> None:
+        def _write() -> None:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = self.path.with_suffix(".tmp")
+            with open(tmp_path, "w") as f:
+                json.dump(self._data, f, indent=2)
+            tmp_path.replace(self.path)
+        await asyncio.to_thread(_write)
 
-    def add(self, session_id: str, reading: dict, distances: dict, confidence: float) -> None:
+    async def add(self, session_id: str, reading: dict, distances: dict, confidence: float) -> None:
         self._data[session_id] = {
             "weight_kg": reading["weight_kg"],
             "impedance_ohm": reading.get("impedance_ohm"),
@@ -1338,15 +1342,15 @@ class PendingConfirmations:
             "confidence": confidence,
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
-        self._save()
+        await self._save()
 
-    def pop(self, session_id: str) -> Optional[dict]:
+    async def pop(self, session_id: str) -> Optional[dict]:
         entry = self._data.pop(session_id, None)
         if entry is not None:
-            self._save()
+            await self._save()
         return entry
 
-    def pop_expired(self, timeout_hours: float) -> dict:
+    async def pop_expired(self, timeout_hours: float) -> dict:
         now = datetime.now(timezone.utc)
         expired = {}
         for sid, entry in list(self._data.items()):
@@ -1354,7 +1358,7 @@ class PendingConfirmations:
             if (now - created).total_seconds() > timeout_hours * 3600:
                 expired[sid] = self._data.pop(sid)
         if expired:
-            self._save()
+            await self._save()
         return expired
 
     @staticmethod
@@ -1808,7 +1812,7 @@ async def run_scanner(config: dict, logger: logging.Logger) -> None:
                             reading["timestamp"].isoformat(),
                         )
 
-                        result = detector.classify(
+                        result = await detector.classify(
                             reading["weight_kg"], imp, reading["timestamp"]
                         )
 
@@ -1823,7 +1827,7 @@ async def run_scanner(config: dict, logger: logging.Logger) -> None:
                                 result.reason,
                             )
                             if ntfy_enabled:
-                                pending_confirmations.add(
+                                await pending_confirmations.add(
                                     session_id, reading, result.distances, result.confidence
                                 )
                                 send_ambiguous_notification(
@@ -1870,7 +1874,7 @@ async def run_scanner(config: dict, logger: logging.Logger) -> None:
                         "[%s] Processing ntfy reply: user=%s", sid, chosen_user
                     )
 
-                    entry = pending_confirmations.pop(sid)
+                    entry = await pending_confirmations.pop(sid)
                     if entry is None:
                         logger.debug(
                             "Received confirmation for unknown/already-resolved "
@@ -1888,7 +1892,7 @@ async def run_scanner(config: dict, logger: logging.Logger) -> None:
                         )
                         continue
 
-                    if not detector.manual_commit(
+                    if not await detector.manual_commit(
                         chosen_user, resolved_reading["weight_kg"],
                         resolved_reading.get("impedance_ohm"), resolved_reading["timestamp"],
                     ):
@@ -1918,7 +1922,8 @@ async def run_scanner(config: dict, logger: logging.Logger) -> None:
 
                 # Sweep pending confirmations that timed out with no reply
                 if ntfy_enabled:
-                    for sid, entry in pending_confirmations.pop_expired(ntfy_timeout_hours).items():
+                    expired = await pending_confirmations.pop_expired(ntfy_timeout_hours)
+                    for sid, entry in expired.items():
                         logger.warning(
                             "[%s] Ambiguous reading timed out waiting for confirmation "
                             "(%.0fh) — writing as unassigned", sid, ntfy_timeout_hours,
