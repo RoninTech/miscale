@@ -457,15 +457,6 @@ async def get_scale_info(mac: str, logger: logging.Logger, config: dict) -> None
     mac_upper = mac.upper()
     logger.info("Connecting to scale %s to read device information...", mac_upper)
     
-    # Query InfluxDB for last weight unit if enabled
-    influx_cfg = config.get("influxdb", {})
-    influx_writer = InfluxDBWriter(influx_cfg, logger)
-    await influx_writer.initialize()
-    last_unit = influx_writer.get_last_unit()
-    if last_unit is not None:
-        logger.info("Weight unit (from last reading): %s", last_unit)
-    influx_writer.close()
-    
     chars = [
         (CHAR_SYSTEM_ID, "System ID"),
         (CHAR_PNP_ID, "PnP ID"),
@@ -517,6 +508,15 @@ async def get_scale_info(mac: str, logger: logging.Logger, config: dict) -> None
                     logger.warning("%s: error (%s: %s)", label, type(e).__name__, e)
     except Exception as exc:
         logger.warning("Failed to read scale information: %s", exc)
+    
+    # Best-effort: query InfluxDB for last weight unit if enabled
+    influx_cfg = config.get("influxdb", {})
+    influx_writer = InfluxDBWriter(influx_cfg, logger)
+    await influx_writer.initialize()
+    last_unit = influx_writer.get_last_unit()
+    if last_unit is not None:
+        logger.info("Weight unit (from last reading): %s", last_unit)
+    influx_writer.close()
 
 # ---------------------------------------------------------------------------
 # Advertisement parser
