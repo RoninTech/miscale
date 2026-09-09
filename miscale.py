@@ -360,10 +360,26 @@ async def dump_history(mac: str, logger: logging.Logger) -> None:
             logger.info("Starting data transfer (%d record(s))...", expected_count)
             await client.write_gatt_char(CHAR_BODY_COMP_HISTORY, bytes([0x02]), response=False)
 
+            inactivity_timeout = 5.0
+            last_record_time = asyncio.get_event_loop().time()
+
             async def _wait_for_data():
+                nonlocal last_record_time
+                prev_count = 0
                 # Wait until we have all records or timeout
                 while len(records) < expected_count:
                     await asyncio.sleep(0.5)
+                    now_time = asyncio.get_event_loop().time()
+                    if len(records) != prev_count:
+                        if len(records) > 0:
+                            last_record_time = now_time
+                        prev_count = len(records)
+                    elif now_time - last_record_time > inactivity_timeout:
+                        logger.info(
+                            "No new records for %.1fs, stopping (got %d/%d)",
+                            inactivity_timeout, len(records), expected_count,
+                        )
+                        break
                     if len(records) > 0 and len(records) % 20 == 0:
                         logger.info("Received %d/%d records", len(records), expected_count)
 
