@@ -190,7 +190,8 @@ async def set_scale_time(mac: str, logger: logging.Logger) -> None:
     """Connect to the scale and set its internal clock to the current time."""
     from datetime import datetime
 
-    now = datetime.now()
+    now = datetime.now().astimezone()
+    logger.info("Using local timezone: %s (UTC%s)", now.tzname(), now.strftime("%z"))
     payload = bytes([
         now.year & 0xFF, (now.year >> 8) & 0xFF,
         now.month, now.day,
