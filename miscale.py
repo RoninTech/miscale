@@ -106,6 +106,10 @@ FLAG_HAS_IMPEDANCE = 1     # bit 1 of byte1 = overall bit 9
 FLAG_STABILIZED = 5        # bit 5 of byte1 = overall bit 13
 FLAG_LOAD_REMOVED = 7      # bit 7 of byte1 = overall bit 15
 
+# Protocol constant for history transfer (00002a2f characteristic).
+# Observed in Zepp Life app traffic; purpose and origin unknown.
+HISTORY_DEVICE_ID = bytes([0xDE, 0xAD, 0xBE, 0xEF])
+
 
 def decode_weight(unit_code: int, weight_raw: int) -> tuple[float, str]:
     """Convert a raw weight value from the scale to kilograms and a unit name.
@@ -290,7 +294,6 @@ async def dump_history(mac: str, logger: logging.Logger) -> None:
     """
     from datetime import datetime, timezone
 
-    DEVICE_ID = bytes([0xDE, 0xAD, 0xBE, 0xEF])
     mac_upper = mac.upper()
     logger.info("Connecting to scale %s to dump history...", mac_upper)
 
@@ -324,7 +327,7 @@ async def dump_history(mac: str, logger: logging.Logger) -> None:
             await asyncio.sleep(0.2)
 
             # Step 1: Query data size
-            size_cmd = bytes([0x01]) + DEVICE_ID
+            size_cmd = bytes([0x01]) + HISTORY_DEVICE_ID
             await client.write_gatt_char(CHAR_BODY_COMP_HISTORY, size_cmd, response=False)
             logger.info("Querying history size...")
 
@@ -404,7 +407,7 @@ async def dump_history(mac: str, logger: logging.Logger) -> None:
 
                 # Step 5: Advance sync position
                 await client.write_gatt_char(
-                    CHAR_BODY_COMP_HISTORY, bytes([0x04]) + DEVICE_ID, response=False
+                    CHAR_BODY_COMP_HISTORY, bytes([0x04]) + HISTORY_DEVICE_ID, response=False
                 )
                 await asyncio.sleep(0.2)
             except BleakError as exc:
