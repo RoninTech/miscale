@@ -639,9 +639,9 @@ def parse_advertisement(service_data: dict[bytes | str, bytes]) -> Optional[dict
     load_removed = bool(byte1 & (1 << FLAG_LOAD_REMOVED))      # bit 7 → overall bit 15
 
     # Valid reading: weight stabilised AND person still on scale.
-    # Impedance typically only arrives once the reading is fully final —
-    # readings without it yet are still valid "intermediate" readings and
-    # are handled as such by SessionTracker, not rejected here.
+    # Only stabilized readings are accepted here; the intermediate-vs-final
+    # distinction is handled by whether impedance is present in the stabilized
+    # reading, not by accepting non-stabilized readings.
     if not is_stabilized or load_removed:
         return None
 
