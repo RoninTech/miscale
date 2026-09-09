@@ -34,6 +34,20 @@ except ImportError:
 from bleak import BleakClient, BleakScanner
 from bleak.exc import BleakError
 
+
+# ---------------------------------------------------------------------------
+# Custom exceptions
+# ---------------------------------------------------------------------------
+
+
+class MiscaleError(Exception):
+    """Base exception for miscale application errors."""
+
+
+class ConfigError(MiscaleError):
+    """Raised when there's a problem with the configuration."""
+
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -166,8 +180,7 @@ def load_config(path: str) -> dict:
     """Load and return the TOML configuration file."""
     config_path = Path(path).expanduser()
     if not config_path.exists():
-        print(f"Error: config file not found: {config_path}", file=sys.stderr)
-        sys.exit(1)
+        raise ConfigError(f"config file not found: {config_path}")
 
     with open(config_path, "rb") as f:
         return tomllib.load(f)
@@ -430,11 +443,9 @@ async def set_scale_unit(mac: str, unit: str, logger: logging.Logger) -> None:
     """
     unit_lower = unit.lower()
     if unit_lower not in CONFIG_UNIT_MAP:
-        logger.error(
-            "Unknown display unit '%s'. Supported units: kg, lbs, catty (jin)",
-            unit,
+        raise ValueError(
+            f"Unknown display unit '{unit}'. Supported units: kg, lbs, catty (jin)"
         )
-        sys.exit(1)
 
     unit_code = CONFIG_UNIT_MAP[unit_lower]
     payload = bytes([0x06, 0x04, 0x00, unit_code])
@@ -2017,8 +2028,7 @@ def main():
         scan_cfg = config.get("scan", {})
         mac = scan_cfg.get("scale_mac", "")
         if not mac:
-            logger.error("No scale MAC configured in [scan] section")
-            sys.exit(1)
+            raise MiscaleError("No scale MAC configured in [scan] section")
         asyncio.run(get_scale_info(mac, logger, config))
         return
 
@@ -2027,8 +2037,7 @@ def main():
         scan_cfg = config.get("scan", {})
         mac = scan_cfg.get("scale_mac", "")
         if not mac:
-            logger.error("No scale MAC configured in [scan] section")
-            sys.exit(1)
+            raise MiscaleError("No scale MAC configured in [scan] section")
         asyncio.run(set_scale_time(mac, logger))
         return
 
@@ -2037,8 +2046,7 @@ def main():
         scan_cfg = config.get("scan", {})
         mac = scan_cfg.get("scale_mac", "")
         if not mac:
-            logger.error("No scale MAC configured in [scan] section")
-            sys.exit(1)
+            raise MiscaleError("No scale MAC configured in [scan] section")
         asyncio.run(set_scale_unit(mac, args.set_unit, logger))
         return
 
@@ -2047,8 +2055,7 @@ def main():
         scan_cfg = config.get("scan", {})
         mac = scan_cfg.get("scale_mac", "")
         if not mac:
-            logger.error("No scale MAC configured in [scan] section")
-            sys.exit(1)
+            raise MiscaleError("No scale MAC configured in [scan] section")
         confirm = input(
             "WARNING: This will irreversibly erase all stored history from "
             "the scale. Type 'erase' to confirm: "
@@ -2064,8 +2071,7 @@ def main():
         scan_cfg = config.get("scan", {})
         mac = scan_cfg.get("scale_mac", "")
         if not mac:
-            logger.error("No scale MAC configured in [scan] section")
-            sys.exit(1)
+            raise MiscaleError("No scale MAC configured in [scan] section")
         asyncio.run(dump_history(mac, logger))
         return
 
@@ -2073,6 +2079,9 @@ def main():
         asyncio.run(run_scanner(config, logger))
     except KeyboardInterrupt:
         logger.info("Interrupted by user — shutting down")
+    except MiscaleError as exc:
+        logger.error("%s", exc)
+        sys.exit(1)
 
 # ---------------------------------------------------------------------------
 
