@@ -768,6 +768,7 @@ class SessionTracker:
                     self._next_session_id(mac), mac,
                 )
                 self._sessions[mac] = session
+                self._last_seen[mac] = ts
 
         else:
             session = MeasurementSession(
