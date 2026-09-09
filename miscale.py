@@ -1201,6 +1201,7 @@ class InfluxDBWriter:
         self._logger = logger
         self._client = None
         self._last_reconnect_attempt: Optional[datetime] = None
+        self._lock = threading.Lock()
 
     @classmethod
     async def create(cls, config: dict, logger: logging.Logger) -> "InfluxDBWriter":
@@ -1240,25 +1241,26 @@ class InfluxDBWriter:
 
     def _connect_once(self) -> bool:
         """Single connection attempt. Returns True on success."""
-        try:
-            from influxdb import InfluxDBClient  # type: ignore
-            client = InfluxDBClient(
-                host=self._host,
-                port=self._port,
-                database=self._database,
-                timeout=5,
-            )
-            client.write_points([])
-            self._client = client
-            self._logger.info(
-                "InfluxDB connected at %s:%d, database=%s",
-                self._host, self._port, self._database,
-            )
-            return True
-        except Exception:
-            self._client = None
-            self._logger.debug("InfluxDB connection attempt failed", exc_info=True)
-            return False
+        with self._lock:
+            try:
+                from influxdb import InfluxDBClient  # type: ignore
+                client = InfluxDBClient(
+                    host=self._host,
+                    port=self._port,
+                    database=self._database,
+                    timeout=5,
+                )
+                client.write_points([])
+                self._client = client
+                self._logger.info(
+                    "InfluxDB connected at %s:%d, database=%s",
+                    self._host, self._port, self._database,
+                )
+                return True
+            except Exception:
+                self._client = None
+                self._logger.debug("InfluxDB connection attempt failed", exc_info=True)
+                return False
 
     def ensure_connected(self) -> None:
         """Call periodically from the main loop. No-op if already
