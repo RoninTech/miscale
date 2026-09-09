@@ -115,6 +115,15 @@ def decode_weight(unit_code: int, weight_raw: int) -> tuple[float, str]:
     return weight_kg, unit_name
 
 
+def _is_erase_ack(data: bytes | bytearray) -> bool:
+    """Check if data is a valid erase-history acknowledgement.
+
+    Matches responses regardless of the first byte (firmware variant)
+    and ignores extra trailing bytes.
+    """
+    return len(data) == 5 and data[1:4] == bytes([0x06, 0x12, 0x00]) and data[4] == 0x01
+
+
 DEFAULT_CONFIG = "miscale.toml"
 
 # ---------------------------------------------------------------------------
@@ -206,7 +215,6 @@ async def erase_history(mac: str, logger: logging.Logger) -> None:
     This operation is irreversible.
     """
     payload = bytes([0x06, 0x12, 0x00, 0x00])
-    expected_responses = [bytes([0x16, 0x06, 0x12, 0x00, 0x01]), bytes([0x10, 0x06, 0x12, 0x00, 0x01])]
     mac_upper = mac.upper()
     logger.info("Connecting to scale %s to erase history...", mac_upper)
 
@@ -222,7 +230,7 @@ async def erase_history(mac: str, logger: logging.Logger) -> None:
             notification_count,
             bytes(data).hex(),
         )
-        if bytes(data) in expected_responses:
+        if _is_erase_ack(data):
             response_data.extend(data)
             response_found.set()
 
