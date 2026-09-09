@@ -1443,7 +1443,7 @@ def send_ambiguous_notification(base_url: str, topic: str, reply_topic: str,
         with urllib.request.urlopen(req, timeout=10) as resp:
             status = resp.status
             body = resp.read().decode("utf-8", errors="replace")
-        if status not in (200, 201):
+        if not (200 <= status < 300):
             logger.error(
                 "[%s] Notification server rejected request with status code: %d",
                 session_id, status,
@@ -1504,7 +1504,7 @@ def send_weight_reading_notification(base_url: str, topic_template: str, user_id
         with urllib.request.urlopen(req, timeout=10) as resp:
             status = resp.status
             body = resp.read().decode("utf-8", errors="replace")
-        if status not in (200, 201):
+        if not (200 <= status < 300):
             logger.error(
                 "[%s] Notification server rejected request with status code: %d",
                 user_id, status,
