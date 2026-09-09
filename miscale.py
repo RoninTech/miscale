@@ -1724,7 +1724,7 @@ async def run_scanner(config: dict, logger: logging.Logger) -> None:
                      influx_cfg.get("database", "miscale"))
 
     # Thread-safe queue for BLE callback → main loop communication
-    pending_queue: asyncio.Queue[tuple] = asyncio.Queue()
+    pending_queue: asyncio.Queue[tuple] = asyncio.Queue(maxsize=1000)
 
     def _detection_callback(device, advertisement_data) -> None:
         """Internal callback passed to BleakScanner — pushes into the queue."""
