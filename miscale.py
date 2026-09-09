@@ -214,8 +214,10 @@ async def set_scale_time(mac: str, logger: logging.Logger) -> None:
                 now.strftime("%Y-%m-%d %H:%M:%S"),
                 read_time.strftime("%Y-%m-%d %H:%M:%S"),
             )
-    except Exception as exc:
-        logger.warning("Failed to set scale clock: %s", exc)
+    except BleakError:
+        logger.exception("Failed to set scale clock (BLE error)")
+    except Exception:
+        logger.exception("Failed to set scale clock (unexpected error)")
 
 
 async def erase_history(mac: str, logger: logging.Logger) -> None:
@@ -270,8 +272,10 @@ async def erase_history(mac: str, logger: logging.Logger) -> None:
                 mac_upper,
                 bytes(response_data).hex(),
             )
-    except Exception as exc:
-        logger.warning("Failed to erase history: %s", exc)
+    except BleakError:
+        logger.exception("Failed to erase history (BLE error)")
+    except Exception:
+        logger.exception("Failed to erase history (unexpected error)")
 
 
 async def dump_history(mac: str, logger: logging.Logger) -> None:
@@ -443,13 +447,15 @@ async def dump_history(mac: str, logger: logging.Logger) -> None:
                         is_stabilized,
                         load_removed,
                     )
-                except Exception as exc:
-                    logger.warning("  #%d: failed to decode: %s (%s)", i, raw.hex(), exc)
+                except Exception:
+                    logger.exception("  #%d: failed to decode: %s", i, raw.hex())
 
             logger.info("=" * 60)
 
-    except Exception as exc:
-        logger.warning("Failed to dump history: %s", exc)
+    except BleakError:
+        logger.exception("Failed to dump history (BLE error)")
+    except Exception:
+        logger.exception("Failed to dump history (unexpected error)")
 
 
 async def set_scale_unit(mac: str, unit: str, logger: logging.Logger) -> None:
@@ -477,8 +483,10 @@ async def set_scale_unit(mac: str, unit: str, logger: logging.Logger) -> None:
             logger.info(
                 "Display unit set to %s on scale %s", unit_lower, mac_upper,
             )
-    except Exception as exc:
-        logger.warning("Failed to set scale display unit: %s", exc)
+    except BleakError:
+        logger.exception("Failed to set scale display unit (BLE error)")
+    except Exception:
+        logger.exception("Failed to set scale display unit (unexpected error)")
 
 
 async def get_scale_info(mac: str, logger: logging.Logger, config: dict) -> None:
@@ -533,10 +541,12 @@ async def get_scale_info(mac: str, logger: logging.Logger, config: dict) -> None
                     logger.info("%s: %s", label, value.hex())
                 except BleakError as e:
                     logger.warning("%s: not available (%s)", label, e)
-                except Exception as e:
-                    logger.warning("%s: error (%s: %s)", label, type(e).__name__, e)
-    except Exception as exc:
-        logger.warning("Failed to read scale information: %s", exc)
+                except Exception:
+                    logger.exception("%s: unexpected error", label)
+    except BleakError:
+        logger.exception("Failed to read scale information (BLE error)")
+    except Exception:
+        logger.exception("Failed to read scale information (unexpected error)")
     
     # Best-effort: query InfluxDB for last weight unit if enabled
     influx_cfg = config.get("influxdb", {})
@@ -1232,9 +1242,9 @@ class InfluxDBWriter:
                 self._host, self._port, self._database,
             )
             return True
-        except Exception as exc:
+        except Exception:
             self._client = None
-            self._logger.debug("InfluxDB connection attempt failed: %s", exc)
+            self._logger.debug("InfluxDB connection attempt failed", exc_info=True)
             return False
 
     def ensure_connected(self) -> None:
@@ -1296,8 +1306,8 @@ class InfluxDBWriter:
                 "Wrote reading to InfluxDB: %.2f kg, user=%s, session=%s, confidence=%.2f",
                 weight, user, session_id, confidence,
             )
-        except Exception as exc:
-            self._logger.warning("Failed to write to InfluxDB: %s", exc)
+        except Exception:
+            self._logger.exception("Failed to write to InfluxDB")
 
     def get_last_unit(self) -> Optional[str]:
         """Get the weight unit name from the most recent reading."""
@@ -1313,8 +1323,8 @@ class InfluxDBWriter:
             points = list(result.get_points())  # type: ignore[union-attr]
             if points and points[0].get("unit_name"):
                 return str(points[0]["unit_name"])
-        except Exception as exc:
-            self._logger.debug("Failed to query last unit: %s", exc)
+        except Exception:
+            self._logger.debug("Failed to query last unit: %s", exc_info=True)
         return None
 
     def close(self):
@@ -1601,9 +1611,9 @@ def _ntfy_listener_thread(base_url: str, reply_topic: str,
                             reply["session_id"], reply["user"],
                         )
                         out_queue.put(reply)
-        except Exception as exc:
+        except Exception:
             if not stop_event.is_set():
-                logger.warning("ntfy listener lost connection, reconnecting: %s", exc)
+                logger.exception("ntfy listener lost connection, reconnecting")
                 time.sleep(5)
 
 
