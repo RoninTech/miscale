@@ -1113,17 +1113,18 @@ def compute_derived_metrics(user_info_cfg: dict, user_id: Optional[str],
 class InfluxDBWriter:
     """Writes scale readings to InfluxDB 1.x.
 
-    Connection handling has two layers, since a one-shot connection
-    attempt at startup permanently disables writing for the whole run if
-    InfluxDB (e.g. a Docker container) isn't ready yet at boot:
-      1. Bounded retries at construction time — handles the common
-         "systemd started this before the InfluxDB container finished
-         initializing" race, without blocking forever if InfluxDB is
-         genuinely misconfigured or intentionally stopped.
-      2. ensure_connected(), called periodically from the main loop —
-         self-heals if InfluxDB comes up late (past the startup retry
-         budget) or bounces mid-run, without needing a restart. Rate
-         limited so a persistently-down server isn't hammered.
+    Two-step lifecycle:
+      1. Construct with `InfluxDBWriter(config, logger)` — no connection
+         is made at this point.
+      2. Call `await writer.initialize()` from an async context before
+         use — handles the common "systemd started this before the
+         InfluxDB container finished initializing" race with bounded
+         retries.
+
+    After initialization, ensure_connected() is called periodically from
+    the main loop to self-heal if InfluxDB comes up late (past the startup
+    retry budget) or bounces mid-run, without needing a restart. Rate
+    limited so a persistently-down server isn't hammered.
     """
 
     def __init__(self, config: dict, logger: logging.Logger):
@@ -1138,6 +1139,13 @@ class InfluxDBWriter:
         self._logger = logger
         self._client = None
         self._last_reconnect_attempt: Optional[datetime] = None
+
+    @classmethod
+    async def create(cls, config: dict, logger: logging.Logger) -> "InfluxDBWriter":
+        """Construct and initialize an InfluxDBWriter in one step."""
+        writer = cls(config, logger)
+        await writer.initialize()
+        return writer
 
     async def initialize(self) -> None:
         """Non-blocking startup connection with retries. Call this from
@@ -1203,24 +1211,6 @@ class InfluxDBWriter:
         self._last_reconnect_attempt = now
         if self._connect_once():
             self._logger.info("InfluxDB connection recovered")
-
-    def get_last_weight(self, user: str) -> Optional[float]:
-        """Get the most recent weight for a user from InfluxDB."""
-        if not self._client or not self._enabled:
-            return None
-
-        try:
-            query = (
-                f'SELECT weight_kg FROM "weight" '
-                f"WHERE \"user\" = '{user}' ORDER BY time DESC LIMIT 1"
-            )
-            result = self._client.query(query)  # type: ignore[assignment]
-            points = list(result.get_points())  # type: ignore[union-attr]
-            if points:
-                return float(points[0]["weight_kg"])
-        except Exception as exc:
-            self._logger.debug("Failed to query last weight for %s: %s", user, exc)
-        return None
 
     def write_reading(self, session_id: str, user: str,
                       reading: dict, confidence: float = 1.0,
