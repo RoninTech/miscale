@@ -256,26 +256,30 @@ async def erase_history(mac: str, logger: logging.Logger) -> None:
 
     try:
         async with BleakClient(mac, timeout=60.0) as client:
-            await client.start_notify(CHAR_CONFIG, _notification_handler)
-            await client.write_gatt_char(CHAR_CONFIG, payload, response=False)
-            logger.info("History erase command sent to scale %s (this may take 20-30s)...", mac_upper)
-
+            notify_handle = CHAR_CONFIG
+            await client.start_notify(notify_handle, _notification_handler)
             try:
-                await asyncio.wait_for(response_found.wait(), timeout=60.0)
-            except asyncio.TimeoutError:
-                logger.error(
-                    "Timed out waiting for erase-history response from scale %s "
-                    "(scale may still be processing). Total notifications received: %d",
-                    mac_upper,
-                    notification_count,
-                )
-                raise BleakError("No response from scale")
+                await client.write_gatt_char(CHAR_CONFIG, payload, response=False)
+                logger.info("History erase command sent to scale %s (this may take 20-30s)...", mac_upper)
 
-            logger.info(
-                "History erase confirmed on scale %s (response: %s)",
-                mac_upper,
-                bytes(response_data).hex(),
-            )
+                try:
+                    await asyncio.wait_for(response_found.wait(), timeout=60.0)
+                except asyncio.TimeoutError:
+                    logger.error(
+                        "Timed out waiting for erase-history response from scale %s "
+                        "(scale may still be processing). Total notifications received: %d",
+                        mac_upper,
+                        notification_count,
+                    )
+                    raise BleakError("No response from scale")
+
+                logger.info(
+                    "History erase confirmed on scale %s (response: %s)",
+                    mac_upper,
+                    bytes(response_data).hex(),
+                )
+            finally:
+                await client.stop_notify(notify_handle)
     except BleakError:
         logger.exception("Failed to erase history (BLE error)")
     except Exception:
@@ -320,141 +324,152 @@ async def dump_history(mac: str, logger: logging.Logger) -> None:
                 phase, len(size_response), bytes(data).hex(),
             )
 
+    notify_char = CHAR_BODY_COMP_HISTORY
     try:
         async with BleakClient(mac, timeout=15.0) as client:
-            # Subscribe to notifications BEFORE any writes
-            await client.start_notify(CHAR_BODY_COMP_HISTORY, _notification_handler)
-            await asyncio.sleep(0.2)
-
-            # Step 1: Query data size
-            size_cmd = bytes([0x01]) + HISTORY_DEVICE_ID
-            await client.write_gatt_char(CHAR_BODY_COMP_HISTORY, size_cmd, response=False)
-            logger.info("Querying history size...")
-
             try:
-                await asyncio.wait_for(size_received.wait(), timeout=5.0)
-            except asyncio.TimeoutError:
-                logger.warning("No response to size query, sending 0x03 and aborting")
-                await client.write_gatt_char(CHAR_BODY_COMP_HISTORY, bytes([0x03]), response=False)
-                return
-
-            size_resp = bytes(size_response)
-            if len(size_resp) < 3 or size_resp[0] != 1:
-                logger.warning(
-                    "Invalid size response (%s), sending 0x03 and aborting",
-                    size_resp.hex(),
-                )
-                await client.write_gatt_char(CHAR_BODY_COMP_HISTORY, bytes([0x03]), response=False)
-                return
-
-            record_count = int.from_bytes(size_resp[1:3], "little")
-            logger.info("Scale reports %d history record(s)", record_count)
-
-            # Step 2: Close size query
-            await client.write_gatt_char(CHAR_BODY_COMP_HISTORY, bytes([0x03]), response=False)
-            await asyncio.sleep(0.5)  # give scale time to process before data transfer
-
-            if record_count == 0:
-                logger.info("No history records on scale.")
-                return
-
-            # Step 3: Start data transfer
-            phase = "data"
-            await asyncio.sleep(0.2)  # let notification handler settle
-            data_received = asyncio.Event()
-            expected_count = record_count
-
-            logger.info("Starting data transfer (%d record(s))...", expected_count)
-            await client.write_gatt_char(CHAR_BODY_COMP_HISTORY, bytes([0x02]), response=False)
-
-            inactivity_timeout = 5.0
-            last_record_time = asyncio.get_event_loop().time()
-
-            async def _wait_for_data():
-                nonlocal last_record_time
-                prev_count = 0
-                # Wait until we have all records or timeout
-                while len(records) < expected_count:
-                    await asyncio.sleep(0.5)
-                    now_time = asyncio.get_event_loop().time()
-                    if len(records) != prev_count:
-                        if len(records) > 0:
-                            last_record_time = now_time
-                        prev_count = len(records)
-                    elif now_time - last_record_time > inactivity_timeout:
-                        logger.info(
-                            "No new records for %.1fs, stopping (got %d/%d)",
-                            inactivity_timeout, len(records), expected_count,
-                        )
-                        break
-                    if len(records) > 0 and len(records) % 20 == 0:
-                        logger.info("Received %d/%d records", len(records), expected_count)
-
-            try:
-                await asyncio.wait_for(
-                    _wait_for_data(), timeout=120.0
-                )
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "Timeout receiving history records (got %d/%d)",
-                    len(records), expected_count,
-                )
-
-            # Step 4: End data transfer
-            try:
-                await client.write_gatt_char(CHAR_BODY_COMP_HISTORY, bytes([0x03]), response=False)
+                # Subscribe to notifications BEFORE any writes
+                await client.start_notify(notify_char, _notification_handler)
                 await asyncio.sleep(0.2)
 
-                # Step 5: Advance sync position
-                await client.write_gatt_char(
-                    CHAR_BODY_COMP_HISTORY, bytes([0x04]) + HISTORY_DEVICE_ID, response=False
-                )
-                await asyncio.sleep(0.2)
-            except BleakError as exc:
-                logger.warning("BLE write failed during cleanup: %s (connection may have dropped)", exc)
+                # Step 1: Query data size
+                size_cmd = bytes([0x01]) + HISTORY_DEVICE_ID
+                await client.write_gatt_char(CHAR_BODY_COMP_HISTORY, size_cmd, response=False)
+                logger.info("Querying history size...")
 
-            # Decode and display records
-            logger.info("=" * 60)
-            logger.info("HISTORY RECORDS (%d total)", len(records))
-            logger.info("=" * 60)
-
-            for i, raw in enumerate(records, 1):
                 try:
-                    unit_code = raw[0]
-                    flags = raw[1]
-                    year = int.from_bytes(raw[2:4], "little")
-                    month = raw[4]
-                    day = raw[5]
-                    hour = raw[6]
-                    minute = raw[7]
-                    second = raw[8]
-                    impedance = int.from_bytes(raw[9:11], "little")
-                    weight_raw = int.from_bytes(raw[11:13], "little")
+                    await asyncio.wait_for(size_received.wait(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    logger.warning("No response to size query, sending 0x03 and aborting")
+                    await client.write_gatt_char(CHAR_BODY_COMP_HISTORY, bytes([0x03]), response=False)
+                    return
 
-                    weight_kg, unit_name = decode_weight(unit_code, weight_raw)
-
-                    has_imp = bool(flags & 0x02)
-                    is_stabilized = bool(flags & 0x20)
-                    load_removed = bool(flags & 0x80)
-
-                    ts = datetime(year, month, day, hour, minute, second, tzinfo=timezone.utc)
-
-                    logger.info(
-                        "  #%d: %s | %s %s | imp=%s%s Ω | stable=%s load=%s",
-                        i,
-                        ts.strftime("%Y-%m-%d %H:%M:%S"),
-                        weight_kg,
-                        unit_name,
-                        impedance if has_imp else "N/A",
-                        "" if has_imp else " (invalid)",
-                        is_stabilized,
-                        load_removed,
+                size_resp = bytes(size_response)
+                if len(size_resp) < 3 or size_resp[0] != 1:
+                    logger.warning(
+                        "Invalid size response (%s), sending 0x03 and aborting",
+                        size_resp.hex(),
                     )
-                except Exception:
-                    logger.exception("  #%d: failed to decode: %s", i, raw.hex())
+                    await client.write_gatt_char(CHAR_BODY_COMP_HISTORY, bytes([0x03]), response=False)
+                    return
 
-            logger.info("=" * 60)
+                record_count = int.from_bytes(size_resp[1:3], "little")
+                logger.info("Scale reports %d history record(s)", record_count)
 
+                # Step 2: Close size query
+                await client.write_gatt_char(CHAR_BODY_COMP_HISTORY, bytes([0x03]), response=False)
+                await asyncio.sleep(0.5)  # give scale time to process before data transfer
+
+                if record_count == 0:
+                    logger.info("No history records on scale.")
+                    return
+
+                # Step 3: Start data transfer
+                phase = "data"
+                await asyncio.sleep(0.2)  # let notification handler settle
+                data_received = asyncio.Event()
+                expected_count = record_count
+
+                logger.info("Starting data transfer (%d record(s))...", expected_count)
+                await client.write_gatt_char(CHAR_BODY_COMP_HISTORY, bytes([0x02]), response=False)
+
+                inactivity_timeout = 5.0
+                last_record_time = asyncio.get_event_loop().time()
+
+                async def _wait_for_data():
+                    nonlocal last_record_time
+                    prev_count = 0
+                    # Wait until we have all records or timeout
+                    while len(records) < expected_count:
+                        await asyncio.sleep(0.5)
+                        now_time = asyncio.get_event_loop().time()
+                        if len(records) != prev_count:
+                            if len(records) > 0:
+                                last_record_time = now_time
+                            prev_count = len(records)
+                        elif now_time - last_record_time > inactivity_timeout:
+                            logger.info(
+                                "No new records for %.1fs, stopping (got %d/%d)",
+                                inactivity_timeout, len(records), expected_count,
+                            )
+                            break
+                        if len(records) > 0 and len(records) % 20 == 0:
+                            logger.info("Received %d/%d records", len(records), expected_count)
+
+                try:
+                    await asyncio.wait_for(
+                        _wait_for_data(), timeout=120.0
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "Timeout receiving history records (got %d/%d)",
+                        len(records), expected_count,
+                    )
+
+                # Step 4: End data transfer
+                try:
+                    await client.write_gatt_char(CHAR_BODY_COMP_HISTORY, bytes([0x03]), response=False)
+                    await asyncio.sleep(0.2)
+
+                    # Step 5: Advance sync position
+                    await client.write_gatt_char(
+                        CHAR_BODY_COMP_HISTORY, bytes([0x04]) + HISTORY_DEVICE_ID, response=False
+                    )
+                    await asyncio.sleep(0.2)
+                except BleakError as exc:
+                    logger.warning("BLE write failed during cleanup: %s (connection may have dropped)", exc)
+
+                # Decode and display records
+                logger.info("=" * 60)
+                logger.info("HISTORY RECORDS (%d total)", len(records))
+                logger.info("=" * 60)
+
+                for i, raw in enumerate(records, 1):
+                    try:
+                        unit_code = raw[0]
+                        flags = raw[1]
+                        year = int.from_bytes(raw[2:4], "little")
+                        month = raw[4]
+                        day = raw[5]
+                        hour = raw[6]
+                        minute = raw[7]
+                        second = raw[8]
+                        impedance = int.from_bytes(raw[9:11], "little")
+                        weight_raw = int.from_bytes(raw[11:13], "little")
+
+                        # Validate date/time ranges before constructing datetime
+                        if not (2000 <= year <= 2100 and 1 <= month <= 12 and 1 <= day <= 31
+                                and 0 <= hour <= 23 and 0 <= minute <= 59 and 0 <= second <= 59):
+                            logger.warning(
+                                "  #%d: invalid date/time values (year=%d month=%d day=%d %02d:%02d:%02d)",
+                                i, year, month, day, hour, minute, second,
+                            )
+                            continue
+
+                        ts = datetime(year, month, day, hour, minute, second, tzinfo=timezone.utc)
+
+                        weight_kg, unit_name = decode_weight(unit_code, weight_raw)
+
+                        has_imp = bool(flags & 0x02)
+                        is_stabilized = bool(flags & 0x20)
+                        load_removed = bool(flags & 0x80)
+
+                        logger.info(
+                            "  #%d: %s | %s %s | imp=%s%s Ω | stable=%s load=%s",
+                            i,
+                            ts.strftime("%Y-%m-%d %H:%M:%S"),
+                            weight_kg,
+                            unit_name,
+                            impedance if has_imp else "N/A",
+                            "" if has_imp else " (invalid)",
+                            is_stabilized,
+                            load_removed,
+                        )
+                    except Exception:
+                        logger.exception("  #%d: failed to decode: %s", i, raw.hex())
+
+            finally:
+                await client.stop_notify(notify_char)
     except BleakError:
         logger.exception("Failed to dump history (BLE error)")
     except Exception:
