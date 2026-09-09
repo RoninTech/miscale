@@ -211,7 +211,8 @@ async def erase_history(mac: str, logger: logging.Logger) -> None:
     sends 0x06 0x12 0x00 0x00, and waits for the response
     0x10 0x06 0x12 0x00 0x01 (success, firmware V1.0.0.12) or
     0x16 0x06 0x12 0x00 0x01 (older firmwares) within 60 seconds.
-    This operation is irreversible.
+    This operation is irreversible and also resets the scale's internal
+    clock to 1970-01-01 00:00:00 UTC.
     """
     payload = bytes([0x06, 0x12, 0x00, 0x00])
     mac_upper = mac.upper()
@@ -1989,7 +1990,7 @@ def main():
     parser.add_argument(
         "-e", "--erase-history",
         action="store_true",
-        help="Erase the scale's internal history and exit (irreversible)",
+        help="Erase the scale's internal history and exit (irreversible; also resets scale clock to 1970)",
     )
     parser.add_argument(
         "-d", "--dump-history",
