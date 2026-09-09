@@ -9,6 +9,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import queue
 import socket
 import sys
@@ -1399,6 +1400,8 @@ class PendingConfirmations:
             tmp_path = self.path.with_suffix(".tmp")
             with open(tmp_path, "w") as f:
                 json.dump(self._data, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
             tmp_path.replace(self.path)
         await asyncio.to_thread(_write)
 
