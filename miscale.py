@@ -16,6 +16,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -1472,11 +1473,11 @@ def send_ambiguous_notification(base_url: str, topic: str, reply_topic: str,
     reply_url = f"{base_url.rstrip('/')}/{reply_topic}"
 
     actions = "; ".join(
-        f'http, {uid.capitalize()}, {reply_url}, method=POST, '
-        f'body="{session_id}|{uid}", clear=true'
+        f'http, {urllib.parse.quote(uid.capitalize(), safe="")}, {reply_url}, method=POST, '
+        f'body="{urllib.parse.quote(f"{session_id}|{uid}")}", clear=true'
         for uid in user_ids
     )
-    actions += f'; http, Neither, {reply_url}, method=POST, body="{session_id}|__skip__", clear=true'
+    actions += f'; http, {urllib.parse.quote("Neither", safe="")}, {reply_url}, method=POST, body="{urllib.parse.quote(f"{session_id}|__skip__")}", clear=true'
 
     dist_str = ", ".join(f"{u}={d:.2f}" for u, d in distances.items())
     message = (
