@@ -799,7 +799,6 @@ class UserDetector:
         self.max_plausibility_penalty = detection_cfg.get("max_plausibility_penalty", 8.0)
 
         self.states: dict[str, UserFilterState] = self._bootstrap(user_info_cfg)
-        self._load_persisted_state()
 
     # -- setup ---------------------------------------------------------
 
@@ -823,7 +822,7 @@ class UserDetector:
             )
         return states
 
-    def _load_persisted_state(self) -> None:
+    async def _load_persisted_state(self) -> None:
         """Overlay any previously-saved filter state on top of the
         config-bootstrapped defaults. Only users present in the file are
         overridden — new users just keep their config bootstrap."""
@@ -835,8 +834,7 @@ class UserDetector:
             return
 
         try:
-            with open(self.state_file, "r") as f:
-                saved = json.load(f)
+            saved = await asyncio.to_thread(self._read_state_file)
         except (json.JSONDecodeError, OSError) as exc:
             self.logger.warning("Could not read user state file (%s) — using config start weights", exc)
             return
@@ -852,6 +850,19 @@ class UserDetector:
                 if entry.get("last_seen") else None
             )
         self.logger.info("Loaded persisted user state from %s", self.state_file)
+
+    def _read_state_file(self) -> dict:
+        """Synchronous file read helper for asyncio.to_thread."""
+        with open(self.state_file, "r") as f:
+            return json.load(f)
+
+    @classmethod
+    async def create(cls, user_info_cfg: dict, detection_cfg: dict,
+                     state_file: Path, logger: logging.Logger) -> "UserDetector":
+        """Construct and initialize a UserDetector in one step."""
+        detector = cls(user_info_cfg, detection_cfg, state_file, logger)
+        await detector._load_persisted_state()
+        return detector
 
     async def _save_persisted_state(self) -> None:
         def _write() -> None:
@@ -961,7 +972,7 @@ class UserDetector:
         if user_id not in self.states:
             self.logger.warning("manual_commit: unknown user_id '%s' — ignoring", user_id)
             return False
-        impedance = impedance_ohm if impedance_ohm else self.states[user_id].x[1]
+        impedance = impedance_ohm if impedance_ohm is not None else self.states[user_id].x[1]
         z = np.array([weight_kg, float(impedance)])
         await self._commit(user_id, z, timestamp)
         return True
@@ -1588,7 +1599,7 @@ async def run_scanner(config: dict, logger: logging.Logger) -> None:
     state_file = Path(
         detection_cfg.get("state_file", "~/.cache/miscale/user_state.json")
     ).expanduser()
-    detector = UserDetector(user_info_cfg, detection_cfg, state_file, logger)
+    detector = await UserDetector.create(user_info_cfg, detection_cfg, state_file, logger)
 
     # InfluxDB writer (Stage 2)
     influx_cfg = config.get("influxdb", {})
