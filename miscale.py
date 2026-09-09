@@ -89,6 +89,28 @@ FLAG_HAS_IMPEDANCE = 1     # bit 1 of byte1 = overall bit 9
 FLAG_STABILIZED = 5        # bit 5 of byte1 = overall bit 13
 FLAG_LOAD_REMOVED = 7      # bit 7 of byte1 = overall bit 15
 
+
+def decode_weight(unit_code: int, weight_raw: int) -> tuple[float, str]:
+    """Convert a raw weight value from the scale to kilograms and a unit name.
+
+    Handles KG (0x02), LBS (0x03), and Catty (0x04) unit codes.
+    Unknown unit codes fall through with an unconverted raw value.
+    """
+    if unit_code == UNIT_KG:
+        weight_kg = weight_raw / 200.0
+        unit_name = "kg"
+    elif unit_code == UNIT_LBS:
+        weight_kg = (weight_raw / 100.0) * LBS_TO_KG
+        unit_name = "lbs"
+    elif unit_code == UNIT_CATTY:
+        weight_kg = (weight_raw / 100.0) * CATTY_TO_KG
+        unit_name = "catty"
+    else:
+        weight_kg = weight_raw
+        unit_name = f"unknown(0x{unit_code:02x})"
+    return weight_kg, unit_name
+
+
 DEFAULT_CONFIG = "miscale.toml"
 
 # ---------------------------------------------------------------------------
@@ -360,15 +382,7 @@ async def dump_history(mac: str, logger: logging.Logger) -> None:
                     impedance = int.from_bytes(raw[9:11], "little")
                     weight_raw = int.from_bytes(raw[11:13], "little")
 
-                    if unit_code == 0x02:
-                        weight_kg = weight_raw / 200.0
-                        unit_name = "kg"
-                    elif unit_code == 0x03:
-                        weight_kg = weight_raw / 100.0
-                        unit_name = "lbs"
-                    else:
-                        weight_kg = weight_raw
-                        unit_name = f"unknown(0x{unit_code:02x})"
+                    weight_kg, unit_name = decode_weight(unit_code, weight_raw)
 
                     has_imp = bool(flags & 0x02)
                     is_stabilized = bool(flags & 0x20)
@@ -548,16 +562,7 @@ def parse_advertisement(service_data: dict[bytes | str, bytes]) -> Optional[dict
 
     # Byte 0: unit code
     unit_code = payload[0]
-    if unit_code == UNIT_KG:
-        weight_divisor = 200.0
-        to_kg_factor = 1.0
-    elif unit_code == UNIT_LBS:
-        weight_divisor = 100.0
-        to_kg_factor = LBS_TO_KG
-    elif unit_code == UNIT_CATTY:
-        weight_divisor = 100.0
-        to_kg_factor = CATTY_TO_KG
-    else:
+    if unit_code not in UNIT_NAMES:
         # Unknown unit code — skip
         return None
 
@@ -590,8 +595,7 @@ def parse_advertisement(service_data: dict[bytes | str, bytes]) -> Optional[dict
         return None
 
     weight_raw = int.from_bytes(payload[11:13], "little")
-    weight_native = weight_raw / weight_divisor   # in the scale's own unit
-    weight_kg = weight_native * to_kg_factor       # always true kilograms
+    weight_kg, _ = decode_weight(unit_code, weight_raw)
 
     result = {
         "weight_kg": round(weight_kg, 2),
