@@ -191,8 +191,6 @@ def load_config(path: str) -> dict:
 
 async def set_scale_time(mac: str, logger: logging.Logger) -> None:
     """Connect to the scale and set its internal clock to the current time."""
-    from datetime import datetime
-
     now = datetime.now().astimezone()
     logger.info("Using local timezone: %s (UTC%s)", now.tzname(), now.strftime("%z"))
     payload = bytes([
@@ -295,8 +293,6 @@ async def dump_history(mac: str, logger: logging.Logger) -> None:
       4. Read notification records (same format as BLE advertisements)
       5. Send 0x03 to end, then 0x04 [device_id] to advance sync position
     """
-    from datetime import datetime, timezone
-
     mac_upper = mac.upper()
     logger.info("Connecting to scale %s to dump history...", mac_upper)
 
