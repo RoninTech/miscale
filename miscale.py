@@ -9,7 +9,6 @@ import argparse
 import asyncio
 import json
 import logging
-import os
 import queue
 import socket
 import sys
@@ -367,7 +366,6 @@ async def dump_history(mac: str, logger: logging.Logger) -> None:
                 # Step 3: Start data transfer
                 phase = "data"
                 await asyncio.sleep(0.2)  # let notification handler settle
-                data_received = asyncio.Event()
                 expected_count = record_count
 
                 logger.info("Starting data transfer (%d record(s))...", expected_count)
@@ -1797,7 +1795,7 @@ async def run_scanner(config: dict, logger: logging.Logger) -> None:
     async with BleakScanner(
         detection_callback=_detection_callback,
         bluez=bluez_args,  # type: ignore[arg-type]
-    ) as scanner:
+    ) as _:
         logger.info("BLE scanner started, waiting for advertisements…")
         try:
             while True:
